@@ -37,7 +37,7 @@ def create_dataset(folder,
     if isinstance(hole_size_volatility,type(callable)):
         hole_size_volatility_fun = hole_size_volatility
     elif isinstance(hole_size_volatility,(float,int)):
-        hole_size_volatility_fun = lambda : hole_size_volatility
+        hole_size_volatility_fun = lambda : hole_size_volatility()
     elif isinstance(hole_size_volatility,(tuple,list)):
         hole_size_volatility_fun = lambda : np.random.uniform(*hole_size_volatility)
     else:
@@ -67,7 +67,7 @@ def create_dataset(folder,
         measurements = base_thickness_measurements - measurements
         
         # Store the measurements and the circle matrix
-        np.save(folder + f"/circle_{i}",temp_circle.matrix)
+        np.save(folder + f"/shape_{i}",temp_circle.matrix)
         np.save(folder + f"/measurements_{i}",measurements)
 
     return

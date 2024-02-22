@@ -26,6 +26,11 @@ def rollback_reconstruct_shape(measurements, angles, shape : AbsorptionMatrix):
     # This mask will be 1 where the circle is, and 0 where the circle is not.
     gt_zero_mask = shape.matrix > 0
     i = 0
+    # Pad the measurements equally on both sides, so that each measurement is the same length as shape.matrix.shape[1]
+    total_pad = shape.matrix.shape[1] - measurements.shape[1]
+    pad_left = total_pad // 2
+    pad_right = total_pad - pad_left
+    measurements = np.pad(measurements, ((0,0),(pad_left,pad_right)))
     for angle, measurement in zip(angles,measurements):
         # Rotate the matrix to angle
         shape.rotate(angle, inplace=True)
@@ -41,7 +46,7 @@ def rollback_reconstruct_shape(measurements, angles, shape : AbsorptionMatrix):
     
     # Invert the sign of the matrix, and scale to be between 0 and 1
     # Set points outside the circle to be as negative as possible, because we know there is nothing there
-    shape.matrix = np.where(gt_zero_mask,shape.matrix,-np.max(np.abs(shape.matrix)))
+    #shape.matrix = np.where(gt_zero_mask,shape.matrix,-np.max(np.abs(shape.matrix)))
     # Now, the smalle the values are, the more likely it is that there is nothing there.
     # We want to scale the values to be between 0 and 1, so 0 is surely nothing, and 1 is surely something.
     scaler = lambda x : (x - np.min(x)) / (np.max(x) - np.min(x))
