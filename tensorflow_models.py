@@ -2,6 +2,9 @@ import tensorflow as tf
 import os
 import keras
 
+""" Code adapted from https://pyimagesearch.com/2022/02/21/u-net-image-segmentation-in-keras/
+"""
+
 def _double_conv_block(x, n_filters):
    # Conv2D then ReLU activation
    x = keras.layers.Conv2D(n_filters, 3, padding = "same", activation = "relu", kernel_initializer = "he_normal")(x)
@@ -18,10 +21,15 @@ def _downsample_block(x, n_filters):
 def _upsample_block(x, conv_features, n_filters):
     # upsample
     x = keras.layers.Conv2DTranspose(n_filters, 3, 2, padding="same")(x)
-    # Slice if necessary
+    
+    # Hacky fix to make sure the shapes match.
+    # I'm not sure why this happens
     if x.shape != conv_features.shape:
         # Skip the first value, except on batch size and channels
-        conv_features = conv_features[:,1:,1:,:]
+        diff0 = conv_features.shape[1] - x.shape[1]
+        diff1 = conv_features.shape[2] - x.shape[2]
+        conv_features = conv_features[:,diff0:,diff1:,:]
+    
     # concatenate
     x = keras.layers.concatenate([x, conv_features])
     # dropout
@@ -65,5 +73,6 @@ def create_a_U_net_model(input_shape = (129,129)):
     # Create the model
     model = keras.models.Model(inputs = inputs, outputs = outputs)
     # Compile the model
-    model.compile(optimizer = "adam", loss = "mse", metrics = ["accuracy"])
+    loss = "binary_crossentropy"
+    model.compile(optimizer = "adam", loss = loss, metrics = ["accuracy"])
     return model

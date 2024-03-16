@@ -4,7 +4,7 @@ and output the real image.
 import tensorflow as tf
 import os
 from AbsorptionMatrices import Square
-from reconstruct import rollback_reconstruct_shape
+from reconstruct import backproject_to_shape, backproject_with_distance_measures
 import numpy as np
 import matplotlib.pyplot as plt
 import keras
@@ -16,109 +16,130 @@ from create_dataset import create_dataset
 # GPU
 print("Num GPUs Available: ", len(tf.config.experimental.list_physical_devices('GPU')))
 
-
-folder = "DatascansTest2"
-
-#create_dataset(folder, 64, 20, (1,3), portion_missing_pixels_bounds=(0.05,0.5), hole_size_volatility=0.1)
-
-# There are files named "shape_<n>.npy" and "measurement_<n>.npy" in the folder
-# Lets find all of them
-measurement_paths = [os.path.join(folder, f"measurements_{i}.npy") for i in range(20)]
-shape_paths = [os.path.join(folder, f"shape_{i}.npy") for i in range(20)]
-
 # Each measurement contains 360 measurements (one for each angle), and each shape is 64x64
 # To train the model, we take measures from  -90 to 90 degrees, and use those to create the first reconstruction
 # The model then takes in the reconstruction and outputs the real image (shape_paths)
 
 # Create a dataset from the paths
-def make_dataset_from_first(measurement_paths, shape_paths):
+def get_tf_dataset(measurement_paths, shape_paths, image_shape, save_reconstructions = True, overwrite_reconstructions = False):
+    
     def generator():
         for measurement_path, shape_path,i in zip(measurement_paths, shape_paths, range(len(measurement_paths))):
-            try:
-                measurements = np.load(measurement_path)
+            reconstr_shape_matrix = None
+            reconstr_angle = None
+            
+            # Check if there is a reconstruction file for this shape
+            if not overwrite_reconstructions:
+                folder = os.path.dirname(shape_path)
+                # Find all files that start with "shape_<i>_reconstructed"
+                reconstructions = [fname for fname in os.listdir(folder) if fname.startswith(f"shape_{i}_reconstructed")]
+                if len(reconstructions) > 0:
+                    reconstr_shape_matrix = np.load(os.path.join(folder, reconstructions[0]))
+                    reconstr_angle = int(reconstructions[0].split("_")[-1].replace(".npy", "").replace("a", ""))
+                    #print(f"Reconstruction found for shape {i}")
+            
+            if reconstr_shape_matrix is not None:
                 shape = np.load(shape_path)
+                yield reconstr_shape_matrix, shape, i, reconstr_angle
+                continue
+            
+            try:
+                shape = np.load(shape_path)
+                measurements = np.load(measurement_path)
             except:
                 print(f"Could not load {measurement_path} or {shape_path}")
                 continue
+            
             # Randomly choose a 30 - 180 degree slice
-            slice_length = np.random.randint(170, 220)
+            slice_length = np.random.randint(20, 90)
             start_index = np.random.randint(0, 359 - slice_length)
             end_index = start_index + slice_length
-            # Get the measurements
-            measurements = measurements[start_index:end_index]
-            base_shape = Square(measurements.shape[1])
-            print(f"Reconstructing shape {i} from {start_index} to {end_index} degrees")
-            print(f"Shape: {shape.shape}, measurements: {measurements.shape}")
-            print(f"base_shape: {base_shape.matrix.shape}")
+            
+            distances_from_front = measurements[start_index:end_index,:,1].astype(np.int32)
+            distances_from_back = measurements[start_index:end_index,:,2].astype(np.int32)
+            measurements = measurements[start_index:end_index,:,0]
+            
+            thicknesses = np.full(measurements.shape, measurements.shape[1])
+            thicknesses = thicknesses - distances_from_front - distances_from_back
+            #print(f"Thickenesses: {thicknesses}")
+            # Now, to adjust the measurements we can calculate the number of missing pixels at each height
+            # which is
+            measurements = thicknesses - measurements
+            
+            #print(f"Reconstructing shape {i} from {start_index} to {end_index} degrees")
+            #print(f"Shape: {shape.shape}, measurements: {measurements.shape}")
             # Reconstruct the shape
-            reconstr_shape = rollback_reconstruct_shape(measurements, np.arange(start_index, end_index), base_shape).matrix
-            yield reconstr_shape, shape, i, slice_length
+            reconstr_shape = backproject_with_distance_measures(measurements,
+                                                                         np.arange(start_index, end_index),
+                                                                         distances_from_front,
+                                                                         distances_from_back,
+                                                                         use_filter=True,
+                                                                         zero_threshold=0.1
+                                                                         )
+            reconstr_shape_matrix = reconstr_shape.matrix
+            reconstr_angle = slice_length
+            # Save the reconstruction
+            if save_reconstructions:
+                # Save to shape_{i}_reconstructed.npy
+                reconstr_path = shape_path.replace(".npy", f"_reconstructed_a{slice_length}.npy")
+                np.save(reconstr_path, reconstr_shape.matrix)
+
+            yield reconstr_shape_matrix, shape, i, reconstr_angle
         return
-    ds = tf.data.Dataset.from_generator(generator, (tf.float32, tf.float32, tf.int32, tf.int32))
-    return ds
-
-# Firstly, we load the measurements, and original shapes.
-# We the reconstruct the shapes from the measurements, and save them to the folder
-# We only do this if necessary
-if True:
-    dataset = make_dataset_from_first(measurement_paths, shape_paths)
-    # Save the reconstructions
-    for i, (reconstr_shape, shape, ith, nangles) in tqdm.tqdm(enumerate(dataset)):
-        np.save(os.path.join(folder, f"reconstructed_shape_{ith}_a{nangles}.npy"), reconstr_shape)
-
-# Load the new dataset
-# Find all paths with "reconstructed_shape" int the name
-reconstructed_shape_paths_unsorted = list(filter(lambda x: "reconstructed_shape" in x, os.listdir(folder)))
-# Sort the paths by the number in the name
-is_ = [int(x.split("_")[2]) for x in reconstructed_shape_paths_unsorted]
-reconstructed_shape_paths = sorted(reconstructed_shape_paths_unsorted, key=lambda x: int(x.split("_")[2]))
-# Load the shape paths
-shape_paths = [os.path.join(folder, f"shape_{i}.npy") for i in is_]
-exit()
-
-def make_dataset_from_second(reconstructed_shape_paths, shape_paths):
-    def generator():
-        for reconstructed_shape_path, shape_path in zip(reconstructed_shape_paths, shape_paths):
-            try:
-                reconstructed_shape = np.load(reconstructed_shape_path)
-                shape = np.load(shape_path)
-            except:
-                #print(f"Could not load {reconstructed_shape_path} or {shape_path}")
-                continue
-            yield reconstructed_shape, shape
-        return
-    ds = tf.data.Dataset.from_generator(generator, (tf.float32, tf.float32))
+    ds = tf.data.Dataset.from_generator(generator, (tf.float32, tf.float32, tf.int32, tf.int32),
+                                        output_shapes=(tf.TensorShape(image_shape), tf.TensorShape(image_shape), tf.TensorShape(()), tf.TensorShape(())))
     return ds
 
 
+folder = "Bezier1000"
+num_samples = 1000
+image_shape = (200,200)
+overwrite_reconstructions = False
+save_reconstructions = True
 
-dataset = make_dataset_from_second(reconstructed_shape_paths, shape_paths)
+# There are files named "shape_<n>.npy" and "measurements_<n>.npy" in the folder
+# Lets find all of them
+measurement_paths = [os.path.join(folder, f"measurements_{i}.npy") for i in range(num_samples)]
+shape_paths = [os.path.join(folder, f"shape_{i}.npy") for i in range(num_samples)]
+
+if overwrite_reconstructions:
+    ds = get_tf_dataset(measurement_paths, shape_paths, image_shape=image_shape, save_reconstructions=save_reconstructions, overwrite_reconstructions=True)
+    # Loop through
+    for x,y,i,a in ds:
+        pass
+    print("Overwritten reconstructions")
+    
+dataset = get_tf_dataset(measurement_paths, shape_paths, image_shape=image_shape, save_reconstructions=save_reconstructions, overwrite_reconstructions=False)
+# Wrap dataset to only yield x,y
+dataset : tf.data.Dataset = dataset.map(lambda x,y,i,a: (x,y))
 
 # Print sizes
-first_sample = list(dataset.take(1))[0]
-input_shape = first_sample[0].shape
-print(f"First sample shape: {first_sample[0].shape}")
-print(f"Second sample shape: {first_sample[1].shape}")
+first_sample = dataset.take(1)
+for x,y in first_sample:
+    print(f"Reconstructed shape: {x.shape}")
+    print(f"Real shape: {y.shape}")
+    input_shape = x.shape
 
-train_dataset = dataset.take(4000)
-test_dataset = dataset.skip(4000)
+test_sz = int(0.2 * num_samples)
+
+train_dataset = dataset.take(num_samples - test_sz)
+test_dataset = dataset.skip(num_samples - test_sz)
 
 
 #model = create_a_U_net_model(input_shape=input_shape)
-model = tf.keras.models.load_model("model_r40.keras")
+model = keras.models.load_model("blurry_to_real_model.keras", custom_objects={"PixelWIseBCE": keras.losses.BinaryCrossentropy(from_logits=False)})
 print(model.summary())
-exit()
 early_stop = tf.keras.callbacks.EarlyStopping(monitor='val_loss', patience=10)
 tensorboard = tf.keras.callbacks.TensorBoard(log_dir="logs/")
 
 # Run eagerly
 #model.run_eagerly = True
-#model.fit(train_dataset.batch(64), epochs=20, validation_data=test_dataset.batch(64), callbacks=[early_stop, tensorboard])
+model.fit(train_dataset.batch(32), epochs=50, validation_data=test_dataset.batch(32), callbacks=[early_stop, tensorboard])
 # Save
-#model.save(f"model_r40.keras")
+model.save("blurry_to_real_model2.keras")
 
 # Visualize reconstructions from the test dataset
-random_indices = np.random.randint(0, 40, 10)
+random_indices = np.random.randint(0, 200, 5)
 for i in random_indices:
     # Take a random image from the test dataset
     reconstr_shape, shape = list(test_dataset.skip(i).take(1))[0]
@@ -132,11 +153,11 @@ for i in random_indices:
     
     ax[1].imshow(reconstr_shape)
     err = reconstruct_error(shape, reconstr_shape)
-    ax[1].set_title("Purely algorithmic reconstruction using 130 degrees of measures")
+    ax[1].set_title("Purely algorithmic reconstruction using X degrees of measures")
     ax[1].set_xlabel(f"Reconstruction error: {err :.2f}")
     
     # Plot the model's reconstruction
-    model_reconstr = model.predict(reconstr_shape.reshape((1,81,81)))[0]
+    model_reconstr = model.predict(reconstr_shape.reshape((1,*reconstr_shape.shape)))[0]
     print(f"Model reconstr shape: {model_reconstr.shape}")
     print(f"shape shape: {shape.shape}")
     model_reconstr = model_reconstr.reshape(shape.shape)

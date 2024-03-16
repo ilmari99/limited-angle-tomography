@@ -3,10 +3,15 @@ import numpy as np
 import random
 import matplotlib.pyplot as plt
 import cv2
-from AbsorptionMatrices import Square, AbsorptionMatrix
+from AbsorptionMatrices import Square, AbsorptionMatrix, Full, FilledBezierCurve, Circle
 from visualize import plot_measurements
 from utils import remove_noise_from_measurements, reconstruct_error
-from reconstruct import rollback_reconstruct_shape
+from reconstruct import (backproject_to_shape,
+                         backproject_to_large_square,
+                         backproject_with_distance_measures,
+                         calc_mask_from_distances,
+                         calc_masks_from_distances,
+                         filter_sinogram)
 from sklearn.preprocessing import StandardScaler, MinMaxScaler
 # Skimage
 from skimage import filters
@@ -20,63 +25,97 @@ This is a short script I started doing to attempt to model where are holes
 in an object by rotating it and seeing how much radiation is absorbed in which part.
 """
 
-
 if __name__ == "__main__":
     
-    get_shape = lambda: Square(100)
+    def get_shape():
+        return Circle(100)
+        success = False
+        shape = None
+        while not success:
+            shape = FilledBezierCurve((160,160), shape_size_frac=0.8, on_fail="ignore", n_bezier_points=12)
+            success = shape.SUCCESS
+        return shape
     
     shape = get_shape()
     base_shape = get_shape()
 
-    angles = np.arange(0,90,0.2)
-    shape.make_holes(10, 0.4, hole_size_volatility=0.1)
-    shape.plot()
+    angles = np.arange(0,180,1)
+    shape.make_holes(10, 0.6, hole_size_volatility=0.2, at_angle=20)
+    ZERO_THRESHOLD = 0.1
     
     # The base measurements give us priori information about the shape of the object.
-    base_measurements = np.array([base_shape.get_measurement(theta) for theta in angles])
-    measurements = np.array([shape.get_measurement(theta) for theta in angles])
-    
-    number_of_blocks_on_row_h_in_base_shape_during_rotation = np.sum(base_measurements, axis = 0)
-    number_of_blocks_on_row_h_in_real_shape_during_rotation = np.sum(measurements, axis = 0)
-    number_of_missing_blocks_on_row_h = number_of_blocks_on_row_h_in_base_shape_during_rotation - number_of_blocks_on_row_h_in_real_shape_during_rotation
+    (measurements,
+     distances_from_front,
+     distances_from_back) = shape.get_multiple_measurements(
+                            angles,
+                            return_distances=True,
+                            zero_threshold=ZERO_THRESHOLD
+                            )
+        
+    # Based on distances from front and back, we can calculate the thickness of the object at each height.
+    thicknesses = np.full(measurements.shape, measurements.shape[1])
+    thicknesses = thicknesses - distances_from_front - distances_from_back
+    #print(f"Thickenesses: {thicknesses}")
+    # Now, to adjust the measurements we can calculate the number of missing pixels at each height
+    # which is
+    adjusted_measurements = thicknesses - measurements
 
-    # Now, for each column in measurements, we multiply by the corresponding coefficient
-    measurements = base_measurements - measurements
-    # Divide each value by base_measurements, and scale to 0-1
-    measurements = measurements# / base_measurements
+    if True:
+        masks = calc_masks_from_distances(distances_from_front, distances_from_back)
+        if False:
+            # Animate the masks
+            fig, ax = plt.subplots()
+            for i in range(masks.shape[0]):
+                ax.matshow(masks[i,:,:])
+                plt.pause(0.01)
+                ax.clear()
+        
+        mask0 = calc_mask_from_distances(distances_from_front[0,:], distances_from_back[0,:])
+        fig, ax = plt.subplots()
+        ax.matshow(mask0)
+        ax.set_title("Distance mask at angle 0")
     
-    
-    fig, ax = plt.subplots()
-    ax.plot(number_of_blocks_on_row_h_in_base_shape_during_rotation, label = "Base shape")
-    ax.plot(number_of_blocks_on_row_h_in_real_shape_during_rotation, label = "Real shape")
-    ax.plot(number_of_missing_blocks_on_row_h, label = "Missing blocks")
-    ax.set_title("Number of blocks on row h during rotation")
-    ax.legend()
-    #plt.show()
-    #exit()
-    
-    print(f"Measurements shape: {measurements.shape}")
-    
-    # Plot the measurements
-    fig,ax = plot_measurements(measurements)
-    ax.set_title("Measurements before removing noise")
-    
-    # Remove noise from the measurements
-    measurements_no_noise = remove_noise_from_measurements(measurements)
-    fig,ax = plot_measurements(measurements_no_noise)
-    ax.set_title("Measurements after removing noise")
+        f = Full(size = (measurements.shape[1],measurements.shape[1]))
+        for angle, mask in zip(angles, masks):
+            f.rotate(angle, inplace=True)
+            f.matrix *= mask
+            f.rotate(-angle, inplace=True)
+        outer_mask = f.matrix > ZERO_THRESHOLD
+        fig, ax = plt.subplots()
+        ax.matshow(outer_mask)
+        ax.set_title("Outer mask")
     
     # Plot the shape
     fig,ax = shape.plot()
     ax.set_title("shape with holes")
-    print(f"Measurements shape: {measurements.shape}")
-    # Reconstruct the shape
-    reconstr_shape = rollback_reconstruct_shape(measurements, angles, base_shape)
+    print(f"Measurements shape: {adjusted_measurements.shape}")
     
+    # Reconstruct the shape
+    reconstr_shape = backproject_with_distance_measures(adjusted_measurements,
+                                                                 angles,
+                                                                 distances_from_front,
+                                                                 distances_from_back,
+                                                                 use_filter=False,
+                                                                 zero_threshold=ZERO_THRESHOLD
+                                                                 )
+
     fig, ax = reconstr_shape.plot()
     err = reconstruct_error(shape.matrix, reconstr_shape.matrix)
     squared_error = np.sum((shape.matrix - reconstr_shape.matrix)**2)
     ax.set_title(f"Reconstructed shape with holes. Error: {squared_error}")
+    
+    fbp_reconstr = backproject_with_distance_measures(adjusted_measurements,
+                                                                angles,
+                                                                distances_from_front,
+                                                                distances_from_back,
+                                                                use_filter=True,
+                                                                zero_threshold=ZERO_THRESHOLD
+                                                                )
+    
+    fig, ax = fbp_reconstr.plot()
+    err = reconstruct_error(shape.matrix, fbp_reconstr.matrix)
+    squared_error = np.sum((shape.matrix - fbp_reconstr.matrix)**2)
+    ax.set_title(f"FBP reconstructed shape with holes. Error: {squared_error}")
     
     
     # Canny

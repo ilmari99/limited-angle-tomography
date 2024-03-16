@@ -1,6 +1,7 @@
 
 __*
 .xrayvenv
+.min_reqs_env/
 *scans/
 elsa/
 logs/
