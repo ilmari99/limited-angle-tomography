@@ -32,10 +32,11 @@ class Square(AbsorptionMatrix):
         """ Add a square with side_len's
         """
         mat = self.matrix
-        highest_row = self.center[0] - self.side_len//2
-        lowest_row = self.center[0] + self.side_len//2
-        leftmost_col = self.center[1] - self.side_len//2
-        rightmost_col = self.center[1] + self.side_len//2
+        highest_row = int(self.center[0] - self.side_len//2)
+        lowest_row = int(self.center[0] + self.side_len//2)
+        leftmost_col = int(self.center[1] - self.side_len//2)
+        rightmost_col = int(self.center[1] + self.side_len//2)
+        print(f"highest_row: {highest_row}, lowest_row: {lowest_row}, leftmost_col: {leftmost_col}, rightmost_col: {rightmost_col}")
         # Fill the square with 1's
         mat[highest_row:lowest_row,leftmost_col:rightmost_col] = 1
         return mat
