@@ -38,7 +38,7 @@ def _upsample_block(x, conv_features, n_filters):
     x = _double_conv_block(x, n_filters)
     return x
 
-def create_a_U_net_model(input_shape = (129,129)):
+def create_a_U_net_model(input_shape = (129,129), compile = True):
     """ Create a U-Net architecture.
     The input is a flawed image, and the output is the corrected image.
     """
@@ -74,5 +74,6 @@ def create_a_U_net_model(input_shape = (129,129)):
     model = keras.models.Model(inputs = inputs, outputs = outputs)
     # Compile the model
     loss = "binary_crossentropy"
-    model.compile(optimizer = "adam", loss = loss, metrics = ["accuracy"])
+    if compile:
+        model.compile(optimizer = "adam", loss = loss, metrics = ["accuracy"])
     return model

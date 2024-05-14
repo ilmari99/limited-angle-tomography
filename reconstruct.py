@@ -137,7 +137,7 @@ def backproject_with_distance_measures(sinogram,
         - use_filter: Whether to use filtered backprojection or not. If a float is given, it is used as the a parameter in the filter function.
     """
     masks = calc_masks_from_distances(distances_from_front, distances_from_back)
-    print(f"Created masks: {masks.shape}")
+    #print(f"Created masks: {masks.shape}")
     full_shape = Full(size = (sinogram.shape[1],sinogram.shape[1]))
     outer_mask = reconstruct_outer_shape(angles, distances_from_front, distances_from_back, zero_threshold = zero_threshold)
     shape = backproject_to_shape(sinogram, angles, full_shape, angle_masks= masks, use_filter=use_filter)
@@ -152,7 +152,7 @@ def reconstruct_outer_shape(angles, distances_from_front, distances_from_back, z
     # We create a shape full of ones, and then at each angle, we rotate the shape, and multiply it with the mask,
     # So we end up with a final mask, that is the topology of the object as calculated from the distance measures.
     full_shape = Full(size = (masks[0].shape[0],masks[0].shape[0]))
-    print(f"Full shape size: {full_shape.size}")
+    #print(f"Full shape size: {full_shape.size}")
     for angle, mask in zip(angles, masks):
         full_shape.rotate(angle, inplace=True)
         full_shape.matrix *= mask

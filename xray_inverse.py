@@ -3,6 +3,7 @@ import numpy as np
 import random
 import matplotlib.pyplot as plt
 import cv2
+import skimage
 from AbsorptionMatrices import Square, AbsorptionMatrix, Full, FilledBezierCurve, Circle
 from visualize import plot_measurements
 from utils import remove_noise_from_measurements, reconstruct_error
@@ -28,7 +29,7 @@ in an object by rotating it and seeing how much radiation is absorbed in which p
 if __name__ == "__main__":
     
     def get_shape():
-        return Circle(100)
+        return Square(70)
         success = False
         shape = None
         while not success:
@@ -51,6 +52,17 @@ if __name__ == "__main__":
                             return_distances=True,
                             zero_threshold=ZERO_THRESHOLD
                             )
+     
+    sinogram = skimage.transform.radon(shape.matrix.T, theta=angles, circle=True)
+    
+    fig, ax = plt.subplots()
+    ax.matshow(sinogram)
+    ax.set_title("Sinogram")
+    
+    fig, ax = plt.subplots()
+    ax.matshow(measurements)
+    ax.set_title("Measurements")
+    
         
     # Based on distances from front and back, we can calculate the thickness of the object at each height.
     thicknesses = np.full(measurements.shape, measurements.shape[1])

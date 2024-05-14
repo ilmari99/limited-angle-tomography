@@ -19,7 +19,7 @@ def make_sample(nholes,
                 zero_threshold=0.1):
     """ Make a sample with holes
     """
-    shape = shape_maker()
+    shape = circle_shape_maker()
 
     # Make the holes
     shape.make_holes(nholes, n_missing_pixels,
@@ -171,7 +171,17 @@ if __name__ == "__main__":
     edgy = 0
     shape_size_frac = 0.9
     get_n_bezier_points = lambda : np.random.randint(3,7)
-    image_shape = (200, 200)
+    image_shape = (128,128)
+    def circle_shape_maker():
+        shp = Circle(63)
+        # pad to 128x128
+        missing_rows = image_shape[0] - shp.matrix.shape[0]
+        missing_cols = image_shape[1] - shp.matrix.shape[1]
+        # Add zeros to top and right
+        shp.matrix = np.pad(shp.matrix, ((0,missing_rows),(0,missing_cols)))
+        shp = Circle.from_matrix(shp.matrix)
+        return shp
+    
     
     def shape_maker():
         """ Create a FilledBezierCurve with random parameters
@@ -209,21 +219,22 @@ if __name__ == "__main__":
         return shape
     
     # Dataset args
-    folder = "Bezier1000"
+    folder = "Circles128x128_1000"
     n_samples = 1000
     n_hole_bounds = (10,15)
-    portion_missing_pixels_bounds = (0.1, 0.3)
+    portion_missing_pixels_bounds = (0.3, 0.6)
     hole_ratio_limit = 5
-    hole_size_volatility = 0.8
+    hole_size_volatility = 0.4
     
     create_dataset_parallel(folder,
-                    shape_maker,
+                    circle_shape_maker,
                     n_samples,
                     n_hole_bounds,
                     portion_missing_pixels_bounds,
                     hole_ratio_limit,
                     hole_size_volatility,
                      )
+    #plot_5_first_samples(folder)
     
     
     
