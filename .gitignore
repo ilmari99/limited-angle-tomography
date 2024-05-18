@@ -6,6 +6,7 @@ __*
 elsa/
 logs/
 limited-angle-tomography/*
+*.npy
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
