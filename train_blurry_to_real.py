@@ -91,7 +91,7 @@ def get_tf_dataset(measurement_paths, shape_paths, image_shape, save_reconstruct
     return ds
 
 
-folder = "Bezier1000"
+folder = "CircleR64_2000_scans"
 num_samples = 1000
 image_shape = (200,200)
 overwrite_reconstructions = False
