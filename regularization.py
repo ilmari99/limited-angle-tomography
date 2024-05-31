@@ -16,8 +16,8 @@ def vector_similarity_regularization(y_hat, base_images, coeff=0.01):
     model.eval()
     model.to('cuda')
     # Get the output of the first layer of the VGG19 model
-    vgg_output = model.features[:3](y_hat)
-    vgg_output_base = model.features[:3](base_images)
+    vgg_output = model.features[:-3](y_hat)
+    vgg_output_base = model.features[:-3](base_images)
     #print(f"VGG output shape: {vgg_output.shape}")
     # Flatten the output
     vgg_output = vgg_output.view(vgg_output.size(0), -1)

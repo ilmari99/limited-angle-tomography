@@ -1,6 +1,59 @@
 import numpy as np
 import cv2
+import torch
+from torch_radon import Radon
 
+
+def filter_sinogram(sino, a=0.1, device='cuda'):
+    """filter projections. Normally a ramp filter multiplied by a window function is used in filtered
+    backprojection. The filter function here can be adjusted by a single parameter 'a' to either approximate
+    a pure ramp filter (a ~ 0)  or one that is multiplied by a sinc window with increasing cutoff frequency (a ~ 1).
+    Credit goes to Wakas Aqram. 
+    inputs: sino - [n x m] torch tensor where n is the number of projections and m is the number of angles used.
+    outputs: filtSino - [n x m] filtered sinogram tensor
+    
+    Reference: https://github.com/csheaff/filt-back-proj
+    """
+    sino = torch.squeeze(sino)
+    sino = sino.T
+    
+    projLen, numAngles = sino.shape
+    step = 2 * np.pi / projLen
+    w = torch.arange(-np.pi, np.pi, step, device=device)
+    if len(w) < projLen:
+        w = torch.cat([w, w[-1] + step])
+    
+    rn1 = abs(2 / a * torch.sin(a * w / 2))
+    rn2 = torch.sin(a * w / 2) / (a * w / 2)
+    r = rn1 * (rn2) ** 2
+    filt = torch.fft.fftshift(r)
+    # TODO: Check if this is correct
+    filt[0] = 0
+    filtSino = torch.zeros((projLen, numAngles), device=device, requires_grad=False)
+    
+    for i in range(numAngles):
+        projfft = torch.fft.fft(sino[:, i])
+        filtProj = projfft * filt
+        ifft_filtProj = torch.fft.ifft(filtProj)
+        
+        filtSino[:, i] = torch.real(ifft_filtProj)
+
+    return filtSino.T
+        
+class FBPRadon(Radon):
+    def __init__(self, resolution, angles, a = 0.1, device='cuda', **kwargs):
+        self.device = device
+        super(FBPRadon, self).__init__(resolution=resolution, angles=angles, **kwargs)
+        self.a = a
+        #self.a = torch.tensor(a, device=device, dtype=torch.float32, requires_grad=True)
+        #self.parameters = [self.a]
+        
+    def forward(self, x):
+        s = super().forward(x)
+        if not self.a:
+            return s
+        s = filter_sinogram(s, a = self.a, device=self.device)
+        return s
 
 def remove_noise_from_measurements(measurements):
     # Remove noise from the image

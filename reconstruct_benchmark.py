@@ -1,6 +1,7 @@
 
 from collections import OrderedDict
 import os
+import time
 
 import cv2
 from AbsorptionMatrices import Circle
@@ -18,10 +19,9 @@ from utils import FBPRadon
 from pytorch_msssim import ssim, ms_ssim
 import phantominator as ph
 from regularization import vector_similarity_regularization, number_of_edges_regularization, binary_regularization
-from pytorch_models import SequenceToImageCNN, UNet, UNet2, SinogramCompletionTransformer, LSTMSinogram, HTCModel
-from torchsummary import summary
-import torchvision
-import torchviz
+from pytorch_models import HTCModel, SequenceToImageCNN, UNet, UNet2, SinogramCompletionTransformer, LSTMSinogram
+import imageio
+
 
 class ModelBase(nn.Module):
     """
@@ -61,6 +61,7 @@ class ModelBase(nn.Module):
     def create_nn(self) -> nn.Module:
         raise NotImplementedError(f"create_nn must be implemented.")
     
+
 class RecostructFromSinogram(ModelBase):
     """ This class is for models, that predict the image directly from the sinogram.
     """
@@ -68,9 +69,8 @@ class RecostructFromSinogram(ModelBase):
         super().__init__(proj_dim, angles, a = a, image_mask=image_mask, device=device)
     
     def create_nn(self) -> nn.Module:
-        htc_net = HTCModel((len(self.angles), self.dim), init_features=16)
+        htc_net = HTCModel((len(self.angles), self.dim),init_features=16)
         htc_net.to("cuda")
-        summary(htc_net, (1,len(self.angles), self.dim), batch_size=1)
         return htc_net
     
     def forward(self, s):
@@ -162,7 +162,6 @@ class BackprojectAndUNet(ModelBase):
         return y_hat, s_hat
     
     
-    
 def create_circle():
     circle = Circle(63)
     nholes = 10
@@ -183,23 +182,15 @@ def get_htc_scan(angles, level = 1, sample = "a", return_raw_sinogram = False):
     base_path = "/home/ilmari/python/limited-angle-tomography/htc2022_test_data/"
     # htc2022_01a_recon_fbp_seg.png
     htc_file = f"htc2022_0{level}{sample}_recon_fbp_seg.png"
-    sinogram_file = f"htc2022_0{level}{sample}_limited_sinogram.csv"
-    angle_file = f"htc2022_0{level}{sample}_angles.csv"
-    angle_file = os.path.join(base_path, angle_file)
-
-    # Load angles
-    angles = np.loadtxt(angle_file,dtype=np.str_, delimiter=",")
-    angles = np.array([float(angle) for angle in angles])
+    sinogram_file = f"htc2022_0{level}{sample}_sinogram.csv"
+    #htc_file = "htc2022_" + htc_file + "_full_recon_fbp_seg.png"
+    
 
     # Load the img
     img = read_image(os.path.join(base_path, htc_file))
-    img = pt.tensor(img, dtype=pt.float32, device='cuda', requires_grad=False)
-    #img = img.squeeze()
-    print(f"Sample {level}{sample} rotating to {angles[0]}")
-    # Rotate to angles[0]
-    img = torchvision.transforms.functional.rotate(img, -angles[0])
+    img = img.to("cuda")
+    #img = pt.tensor(img, dtype=pt.float32, device="cuda")
     img = img.squeeze()
-    
     circle = Circle.from_matrix(img.cpu().detach().numpy())
     _, dist_front, dist_back = circle.get_multiple_measurements(angles, return_distances=True, zero_threshold=0.1)
     outer_mask = reconstruct_outer_shape(angles, dist_front, dist_back, zero_threshold=0.1)
@@ -212,7 +203,7 @@ def get_htc_scan(angles, level = 1, sample = "a", return_raw_sinogram = False):
     if return_raw_sinogram:
         sinogram = np.loadtxt(os.path.join(base_path, sinogram_file), delimiter=',')
         sinogram = pt.tensor(sinogram, dtype=pt.float32, device='cuda') * 255
-        return y, outer_mask, sinogram, angles
+        return y, outer_mask, sinogram
     
     return y, outer_mask
 
@@ -316,197 +307,158 @@ HTC_LEVEL_TO_ANGLES = {
 }
 
 if __name__ == "__main__":
-    
-    htc_level = 7
-    htc_sample = "a"
-    angles = HTC_LEVEL_TO_ANGLES[htc_level]
     A = 5.5
+    S_total_scores = []
+    time_limit_s = 1200
+    image_folder = "BenchmarkReconstruction"
+    SKIP_DONE_TESTS = False
     
+    os.makedirs(image_folder, exist_ok=True)
     
-    #y, outer_mask = get_basic_circle_scan(angles=angles)
-    #y, outer_mask = get_htc_scan(angles=angles, level=htc_level, sample=htc_sample)
-    y, outer_mask, sinogram, angles = get_htc_scan(angles=angles, level=htc_level, sample=htc_sample, return_raw_sinogram=True)
-    # Pad y to 560x560 equally from all sides
-    #num_missing_rows = 560 - y.shape[0]
-    #num_missing_cols = 560 - y.shape[1]
-    #row_pad_up = num_missing_rows // 2
-    #row_pad_down = num_missing_rows - row_pad_up
-    #col_pad_left = num_missing_cols // 2
-    #col_pad_right = num_missing_cols - col_pad_left
-    #y = pt.nn.functional.pad(y, (col_pad_left, col_pad_right, row_pad_up, row_pad_down))
-    #outer_mask = pt.nn.functional.pad(outer_mask, (col_pad_left, col_pad_right, row_pad_up, row_pad_down))
-    #y = pt.ones((560,560), device='cuda', requires_grad=False)
-    num_extra_cols = 560 - y.shape[1]
-    rm_from_left = num_extra_cols // 2 - 1
-    rm_from_right = num_extra_cols - rm_from_left
-    sinogram = sinogram[:, rm_from_left:560-rm_from_right]
-    
-    
-    #y, outer_mask = get_shepp_logan_scan(angles=angles)
-    #angles = angles.cpu().detach().numpy()
-    y_np = y.cpu().detach().numpy()
-    print(f"y shape: {y.shape}")
-    #print(f"s shape: {s.shape}")
-    print(f"angles shape: {angles.shape}")
-    print(f"Sinogram shape: {sinogram.shape}")
-    
-    # Create the model
-    #model = PredictSinogramAndReconstruct(128, np.deg2rad(angles), image_mask=outer_mask, device='cuda')
-    reconstruction_angles = angles - angles[0] + 90
-    model = RecostructFromSinogram(512, np.deg2rad(angles), a=A, image_mask=outer_mask, device='cuda')
-    #model = BackprojectAndUNet(512, np.deg2rad(angles), a=A, image_mask=outer_mask, device='cuda')
-    model.to('cuda')
-    optimizer = optim.Adam(model.parameters(), lr=0.001, amsgrad=True)
-    
-    # Now s is the sinogram of y, and s_hat is the sinogram of y_hat
-    s = model.radon_t.forward(y)
-
-    #fig, ax = plt.subplots(2,1)
-    # Show the sinograms
-    #ax[0].matshow(sinogram.cpu().detach().numpy())
-    #ax[1].matshow(s.cpu().detach().numpy())
-    #plt.show()
-    #exit()
-    if A > 0:
-        s = filter_sinogram(sinogram,A,device="cuda")
-    else:
-        s = sinogram
-    
-
-    # Plot the true y, naive reconstruction y_prime, and the NN predicted y
-    image_fig, image_axes = plt.subplots(2,2, figsize=(10,5))
-    # Plot the true y, and the predicted y
-    image_axes[0][0].matshow(y_np)
-    image_axes[0][1].matshow(s.cpu().detach().numpy())
-    image_axes[0][0].set_title("True image")
-    image_axes[0][1].set_title("True Sinogram")
-    image_axes[1][0].set_title("Predicted image")
-    image_axes[1][1].set_title("Sinogram of predicted image")
-    
-    naive_rec_fig, naive_rec_ax = plt.subplots()
-    y_hat_naive = model.radon_t.backprojection(s)
-    y_hat_naive_np = y_hat_naive.cpu().detach().numpy()
-    naive_rec_ax.matshow(y_hat_naive_np)
-    naive_rec_ax.set_title(f"FBP reconstruction of the true image.")
-    
-    plt.show(block=False)
-    iteration_number = 0
-    #criterion = lambda X, Y : ssim(X.reshape((1,1,*X.shape)), Y.reshape((1,1,*Y.shape)), data_range=1)
-    criterion = LPLoss(p=1.0)
-
-    loss_fig, loss_axes = plt.subplots(1,2, figsize=(10,5))
-    loss_axes[0].set_title("Reconstruction error")
-    loss_axes[0].set_xlabel("Iteration number")
-    loss_axes[0].set_ylabel("Reconstruction error")
-    loss_axes[1].set_title("Loss")
-    loss_axes[1].set_xlabel("Iteration number")
-    loss_axes[1].set_ylabel("Loss")
-
-    reconstruction_errors = []
-    mse_losses = []
-    regularization_losses = []
-    losses = []
-    
-    base_images = load_base_images("Circles128x128_1000")
-
-    def regularization(y_hat):
-        #return pt.tensor(0.0, device='cuda', requires_grad=True)
-        # Apply logistic function to y_hat
-        #y_hat = 1 / (1 + pt.exp(-2*5*y_hat))
-        mat = number_of_edges_regularization(y_hat,coeff=1, filter_sz=3)
-        # Return the mean of the matrix
-        edge_regularization = pt.mean(mat)#**2
-        return edge_regularization
-        
-        y_hat = pt.cat([y_hat, y_hat, y_hat], dim=1)
-        y_hat = y_hat.reshape((1,3,128,128))
-        img_similarity = vector_similarity_regularization(y_hat, base_images, coeff=0.0001)
-        img_similarity = pt.mean(img_similarity)
-        return edge_regularization + img_similarity
-
-    while True:
-        
-        y_hat, s_hat = model(s)
-        y_hat = torchvision.transforms.functional.rotate(y_hat.unsqueeze(0), -angles[0])
-        y_hat = y_hat.reshape(y.shape)
-        s_hat = s_hat.reshape(s.shape)
-        #s_hat = (s_hat - pt.min(s_hat)) / (pt.max(s_hat) - pt.min(s_hat))
-        # Scale s_hat
-        #s_hat = (s_hat - pt.min(s_hat)) / (pt.max(s_hat) - pt.min(s_hat))
-        #s_hat = (s_hat - pt.mean(s_hat)) / pt.std(s_hat)
-        # minimize ||s - s_hat||^2
-        
-        #print(f"Shapes: s_hat: {s_hat.shape}")
-        # Calculate the loss
-        #mse_loss = pt.tensor(0,dtype=pt.float32,requires_grad = True)
-        mse_loss = criterion(s,s_hat)
-        #y_hat = y_hat.reshape((1,128,128))
-        
-        regularization_loss = regularization(y_hat)
-        
-        loss = mse_loss + regularization_loss
-        
-        #regularization_loss.backward(retain_graph=True)
-        
-        mse_losses.append(mse_loss.item())
-        regularization_losses.append(regularization_loss.item())
-        losses.append(loss.item())
-        
-        # Update the model
-        # Retain grads
-        optimizer.zero_grad()
-        loss.backward(retain_graph=True)
-        optimizer.step()
-        
-        # Squeeze and detach
-        y_hat_np = y_hat.cpu().detach().numpy()
-        s_hat_np = s_hat.cpu().detach().numpy()
-
-        total_absolute_reconstruction_error = np.mean(np.abs(y_np - y_hat_np))
-        # Round y_hat, and calculate a confusion matrix by comparing
-        # y_hat and y_np
-        y_hat_rounded_np = np.round(y_hat_np)
-        M = np.zeros((2,2))
-        # M = [[TP, FN], [FP, TN]]
-        M[0,0] = np.sum(np.logical_and(y_np == 1, y_hat_rounded_np == 1))
-        M[0,1] = np.sum(np.logical_and(y_np == 1, y_hat_rounded_np == 0))
-        M[1,0] = np.sum(np.logical_and(y_np == 0, y_hat_rounded_np == 1))
-        M[1,1] = np.sum(np.logical_and(y_np == 0, y_hat_rounded_np == 0))
-        
-        s_score = (M[0,0] * M[1,1] - M[1,0]*M[0,1]) / np.sqrt((M[0,0] + M[0,1]) * (M[1,0] + M[1,1]) * (M[0,0] + M[1,0]) * (M[0,1] + M[1,1]))
-        reconstruction_errors.append(3 - 3*s_score)
-        
-        #print(f"Reconstruction error for True image: {reconstruction_errors[-1]}")
-        #print(f"Error between y_prime and y_hat_prime: {loss}")
-        
-        if iteration_number == 0:
-            # Generate compute graph
-            #torchviz.make_dot(regularization_loss, params=dict(model.named_parameters())).render("compute_graph", format="png")
-            # Show the first prediction
-            image_axes[1][0].matshow(y_hat_np)
-            image_axes[1][1].matshow(s_hat_np)
-            image_fig.canvas.draw()
-            image_fig.canvas.flush_events()
-            input("Press enter to continue")
-        iteration_number += 1
-        if iteration_number % 50 == 0:
-            print(f"Reconstruction error between y and y_hat: {reconstruction_errors[-1]}")
-            print(f"Loss between s and s_hat: {mse_loss}")
-            # Update the figure
-            y_hat_np_rounded = np.round(y_hat_np)
-            image_axes[1][0].matshow(y_hat_np)
-            image_axes[1][1].matshow(s_hat_np)
-            image_fig.canvas.draw()
-            image_fig.canvas.flush_events()
+    for htc_level in range(1,8):
+        S_total_scores.append(0)
+        for sample in ["a", "b", "c"]:
             
-            # Plot the loss and the reconstruction error
-            loss_axes[0].plot(reconstruction_errors)
-            loss_axes[1].plot(losses, color='black')
-            loss_axes[1].plot(mse_losses, color='red')
-            loss_axes[1].plot(regularization_losses, color='blue')
-            loss_axes[1].legend(["Total Loss", "Loss function", "Regularization"])
-            loss_fig.canvas.draw()
-            loss_fig.canvas.flush_events()
-            plt.pause(0.1)
-            #if reconstruction_errors[-1] < 0.001:
-            #    break
+            best_image_name = f"best_image_htc_level_{htc_level}_sample_{sample}.png"
+            best_image_path = os.path.join(image_folder, best_image_name)
+            
+            gif_name = f"reconstruction_images_htc_level_{htc_level}_sample_{sample}.gif"
+            gif_path = os.path.join(image_folder, gif_name)
+            
+            plot_name = f"losses_htc_level_{htc_level}_sample_{sample}.png"
+            plot_path = os.path.join(image_folder, plot_name)
+            
+            # If all the files exist, skip this iteration
+            if SKIP_DONE_TESTS and os.path.exists(best_image_path) and os.path.exists(gif_path) and os.path.exists(plot_path):
+                continue
+
+            angles = HTC_LEVEL_TO_ANGLES[htc_level]
+
+            y, outer_mask, sinogram = get_htc_scan(angles=angles, level=htc_level, sample=sample, return_raw_sinogram=True)
+            num_extra_cols = 560 - y.shape[1]
+            rm_from_left = num_extra_cols // 2
+            rm_from_right = num_extra_cols - rm_from_left
+            sinogram = sinogram[:len(angles), rm_from_left:560-rm_from_right]
+            
+            #y, outer_mask = get_shepp_logan_scan(angles=angles)
+            #angles = angles.cpu().detach().numpy()
+            y_np = y.cpu().detach().numpy()
+            
+            # Create the model
+            #model = PredictSinogramAndReconstruct(128, np.deg2rad(angles), image_mask=outer_mask, device='cuda')
+            model = RecostructFromSinogram(512, np.deg2rad(angles), a=A, image_mask=outer_mask, device='cuda')
+            model.to('cuda')
+            optimizer = optim.Adam(model.parameters(), lr=0.001, amsgrad=True)
+            
+            # Now s is the sinogram of y, and s_hat is the sinogram of y_hat
+            #s = model.radon_t.forward(y)
+            
+            s = filter_sinogram(sinogram, a=A, device='cuda')
+            #s = sinogram
+
+            iteration_number = 0
+            criterion = LPLoss(p=1.0)
+
+            s_errors = []
+            mse_losses = []
+            regularization_losses = []
+            losses = []
+
+            def regularization(y_hat):
+                return pt.tensor(0.0, device='cuda', requires_grad=True)
+                mat = number_of_edges_regularization(y_hat,coeff=1, filter_sz=3)
+                # Return the mean of the matrix
+                edge_regularization = pt.mean(mat)**2
+                return edge_regularization
+            
+            t_start = time.time()
+            
+            images = []
+            image_of_best_reconstruction = None
+            best_s_score = -1
+            
+            while (time.time() - t_start < time_limit_s):
+                
+                print(f"Iteration {iteration_number}", end="\r")
+                y_hat, s_hat = model(s)
+                y_hat = y_hat.reshape(y.shape)
+                s_hat = s_hat.reshape(s.shape)
+                
+                # Calculate the loss
+                mse_loss = criterion(s,s_hat)
+                
+                regularization_loss = regularization(y_hat)
+                
+                loss = mse_loss + regularization_loss
+                
+                mse_losses.append(mse_loss.item())
+                regularization_losses.append(regularization_loss.item())
+                losses.append(loss.item())
+                
+                # Update the model
+                # Retain grads
+                optimizer.zero_grad()
+                loss.backward(retain_graph=True)
+                optimizer.step()
+                
+                # Squeeze and detach
+                y_hat_np = y_hat.cpu().detach().numpy()
+                s_hat_np = s_hat.cpu().detach().numpy()
+
+                # Round y_hat, and calculate a confusion matrix by comparing
+                # y_hat and y_np
+                y_hat_np_rounded = np.round(y_hat_np)
+                M = np.zeros((2,2))
+                # M = [[TP, FN], [FP, TN]]
+                M[0,0] = np.sum(np.logical_and(y_np == 1, y_hat_np_rounded == 1))
+                M[0,1] = np.sum(np.logical_and(y_np == 1, y_hat_np_rounded == 0))
+                M[1,0] = np.sum(np.logical_and(y_np == 0, y_hat_np_rounded == 1))
+                M[1,1] = np.sum(np.logical_and(y_np == 0, y_hat_np_rounded == 0))
+                
+                s_score = (M[0,0] * M[1,1] - M[1,0]*M[0,1]) / np.sqrt((M[0,0] + M[0,1]) * (M[1,0] + M[1,1]) * (M[0,0] + M[1,0]) * (M[0,1] + M[1,1]))
+                s_errors.append(s_score)
+                
+                iteration_number += 1
+                
+                if iteration_number % 30 == 0: 
+                    images.append(y_hat_np)
+                if s_score > best_s_score:
+                    best_s_score = s_score
+                    image_of_best_reconstruction = y_hat_np_rounded
+                
+            # After 1 minute, we find the lowest loss
+            min_loss = min(losses)
+            min_loss_idx = losses.index(min_loss)
+            selected_s_score = s_errors[min_loss_idx]
+            print(f"HTC level: {htc_level}, sample: {sample}, s_score: {selected_s_score}")
+            S_total_scores[-1] += selected_s_score
+            
+            # Save the best image
+            plt.imsave(best_image_path, image_of_best_reconstruction, cmap='gray')
+            
+            # Save the images as a gif
+            images = [255*img for img in images]
+            imageio.mimsave(gif_path, images)
+            
+            # Plot the losses
+            fig, ax = plt.subplots(2,2)
+            fig.suptitle(f"HTC level {htc_level}, sample {sample}")
+            ax[0][0].plot(mse_losses)
+            ax[0][0].set_title("Loss between sinograms")
+            ax[0][1].plot(regularization_losses)
+            ax[0][1].set_title("Regularization loss")
+            ax[1][0].plot(losses)
+            ax[1][0].set_title("Total loss")
+            ax[1][1].plot(s_errors)
+            ax[1][1].set_title("S score")
+            
+            # Save the plot
+            plt.savefig(plot_path)
+            plt.close()
+        print(f"HTC level {htc_level} total s_score: {S_total_scores[-1]}")
+        
+    print(f"All scores: {S_total_scores}")
+            
+            
+            
+            
