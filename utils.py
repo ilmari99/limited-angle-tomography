@@ -44,13 +44,16 @@ class FBPRadon(Radon):
     def __init__(self, resolution, angles, a = 0.1, device='cuda', **kwargs):
         self.device = device
         super(FBPRadon, self).__init__(resolution=resolution, angles=angles, **kwargs)
-        self.a = a
-        #self.a = torch.tensor(a, device=device, dtype=torch.float32, requires_grad=True)
-        #self.parameters = [self.a]
+        #self.a = a
+        self.a = torch.tensor(a, device=device, dtype=torch.float32, requires_grad=False)
+        
+    def parameters(self):
+        return [self.a]
         
     def forward(self, x):
         s = super().forward(x)
-        if not self.a:
+        #self.a = torch.abs(self.a)
+        if torch.equal(self.a, torch.tensor(0.0, device=self.device)):
             return s
         s = filter_sinogram(s, a = self.a, device=self.device)
         return s

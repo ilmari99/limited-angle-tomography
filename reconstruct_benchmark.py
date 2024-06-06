@@ -62,15 +62,16 @@ class ModelBase(nn.Module):
         raise NotImplementedError(f"create_nn must be implemented.")
     
 
-class RecostructFromSinogram(ModelBase):
+class ReconstructFromSinogram(ModelBase):
     """ This class is for models, that predict the image directly from the sinogram.
     """
     def __init__(self, proj_dim: int, angles, a = 0.1, image_mask=None, device="cuda"):
         super().__init__(proj_dim, angles, a = a, image_mask=image_mask, device=device)
     
     def create_nn(self) -> nn.Module:
-        htc_net = HTCModel((len(self.angles), self.dim),init_features=16)
+        htc_net = HTCModel((len(self.angles), self.dim), init_features=64)
         htc_net.to("cuda")
+        #summary(htc_net, (1,len(self.angles), self.dim), batch_size=1)
         return htc_net
     
     def forward(self, s):
@@ -182,15 +183,23 @@ def get_htc_scan(angles, level = 1, sample = "a", return_raw_sinogram = False):
     base_path = "/home/ilmari/python/limited-angle-tomography/htc2022_test_data/"
     # htc2022_01a_recon_fbp_seg.png
     htc_file = f"htc2022_0{level}{sample}_recon_fbp_seg.png"
-    sinogram_file = f"htc2022_0{level}{sample}_sinogram.csv"
-    #htc_file = "htc2022_" + htc_file + "_full_recon_fbp_seg.png"
-    
+    sinogram_file = f"htc2022_0{level}{sample}_limited_sinogram.csv"
+    angle_file = f"htc2022_0{level}{sample}_angles.csv"
+    angle_file = os.path.join(base_path, angle_file)
+
+    # Load angles
+    angles = np.loadtxt(angle_file,dtype=np.str_, delimiter=",")
+    angles = np.array([float(angle) for angle in angles])
 
     # Load the img
     img = read_image(os.path.join(base_path, htc_file))
-    img = img.to("cuda")
-    #img = pt.tensor(img, dtype=pt.float32, device="cuda")
+    img = pt.tensor(img, dtype=pt.float32, device='cuda', requires_grad=False)
+    #img = img.squeeze()
+    print(f"Sample {level}{sample} rotating to {angles[0]}")
+    # Rotate to angles[0]
+    #img = torchvision.transforms.functional.rotate(img, -angles[0])
     img = img.squeeze()
+    
     circle = Circle.from_matrix(img.cpu().detach().numpy())
     _, dist_front, dist_back = circle.get_multiple_measurements(angles, return_distances=True, zero_threshold=0.1)
     outer_mask = reconstruct_outer_shape(angles, dist_front, dist_back, zero_threshold=0.1)
@@ -203,7 +212,7 @@ def get_htc_scan(angles, level = 1, sample = "a", return_raw_sinogram = False):
     if return_raw_sinogram:
         sinogram = np.loadtxt(os.path.join(base_path, sinogram_file), delimiter=',')
         sinogram = pt.tensor(sinogram, dtype=pt.float32, device='cuda') * 255
-        return y, outer_mask, sinogram
+        return y, outer_mask, sinogram, angles
     
     return y, outer_mask
 
@@ -309,7 +318,7 @@ HTC_LEVEL_TO_ANGLES = {
 if __name__ == "__main__":
     A = 5.5
     S_total_scores = []
-    time_limit_s = 1200
+    time_limit_s = 5*60
     image_folder = "BenchmarkReconstruction"
     SKIP_DONE_TESTS = False
     
@@ -334,11 +343,11 @@ if __name__ == "__main__":
 
             angles = HTC_LEVEL_TO_ANGLES[htc_level]
 
-            y, outer_mask, sinogram = get_htc_scan(angles=angles, level=htc_level, sample=sample, return_raw_sinogram=True)
+            y, outer_mask, sinogram, angles = get_htc_scan(angles=angles, level=htc_level, sample=sample, return_raw_sinogram=True)
             num_extra_cols = 560 - y.shape[1]
             rm_from_left = num_extra_cols // 2
             rm_from_right = num_extra_cols - rm_from_left
-            sinogram = sinogram[:len(angles), rm_from_left:560-rm_from_right]
+            sinogram = sinogram[:, rm_from_left:560-rm_from_right]
             
             #y, outer_mask = get_shepp_logan_scan(angles=angles)
             #angles = angles.cpu().detach().numpy()
@@ -346,7 +355,7 @@ if __name__ == "__main__":
             
             # Create the model
             #model = PredictSinogramAndReconstruct(128, np.deg2rad(angles), image_mask=outer_mask, device='cuda')
-            model = RecostructFromSinogram(512, np.deg2rad(angles), a=A, image_mask=outer_mask, device='cuda')
+            model = ReconstructFromSinogram(512, np.deg2rad(angles), a=A, image_mask=outer_mask, device='cuda')
             model.to('cuda')
             optimizer = optim.Adam(model.parameters(), lr=0.001, amsgrad=True)
             
@@ -365,7 +374,7 @@ if __name__ == "__main__":
             losses = []
 
             def regularization(y_hat):
-                return pt.tensor(0.0, device='cuda', requires_grad=True)
+                #return pt.tensor(0.0, device='cuda', requires_grad=True)
                 mat = number_of_edges_regularization(y_hat,coeff=1, filter_sz=3)
                 # Return the mean of the matrix
                 edge_regularization = pt.mean(mat)**2

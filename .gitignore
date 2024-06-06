@@ -7,6 +7,10 @@ elsa/
 logs/
 limited-angle-tomography/*
 *.npy
+htc2022_test_data/
+BenchmarkReconstruction/
+.vscode/
+Circles128x128_1000/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
