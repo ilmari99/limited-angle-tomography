@@ -5,6 +5,41 @@ from pytorch_msssim import ssim
 # Import mobilenet_v2
 from torchvision.models import mobilenet_v3_small
 import matplotlib.pyplot as plt
+from kornia.filters import spatial_gradient
+
+def total_variation_regularization(mat, normalize=True, order=1):
+    """ Calculate the total variation of an image
+    """
+    # Calculate the gradient
+    grad = spatial_gradient(mat.reshape(1,1,mat.shape[0],mat.shape[1]), order=order, mode="diff")
+    grad = grad.squeeze()
+    # Check that there are no NaN values
+    assert not torch.isnan(grad).any(), "There are NaN values in the gradient"
+    grad_x = grad[0,:,:]
+    grad_y = grad[1,:,:]
+    # Anisotropic TV, since we need differentiability
+    grad_x_abs = torch.abs(grad_x)
+    grad_y_abs = torch.abs(grad_y)
+    tv = torch.sum(grad_x_abs + grad_y_abs)
+    if normalize:
+        tv = tv / (mat.shape[0] * mat.shape[1])
+    return tv
+
+def tikhonov_regularization(mat, normalize=True):
+    """ Penalize the norm of the gradient of the image
+    """
+    #print(mat)
+    # Calculate the gradient
+    grad = spatial_gradient(mat.reshape(1,1,mat.shape[0],mat.shape[1]))
+    grad = grad.squeeze()
+    #assert not torch.isnan(grad).any(), "There are NaN values in the gradient"
+    grad_x = grad[0,:,:]
+    grad_y = grad[1,:,:]
+    # Calculate the norm of the gradient
+    norm = torch.sum(grad_x**2 + grad_y**2)
+    if normalize:
+        norm = norm / (mat.shape[0] * mat.shape[1])
+    return norm
 
 
 def vector_similarity_regularization(y_hat, base_images, coeff=0.01):
@@ -16,8 +51,8 @@ def vector_similarity_regularization(y_hat, base_images, coeff=0.01):
     model.eval()
     model.to('cuda')
     # Get the output of the first layer of the VGG19 model
-    vgg_output = model.features[:-3](y_hat)
-    vgg_output_base = model.features[:-3](base_images)
+    vgg_output = model.features[:-1](y_hat)
+    vgg_output_base = model.features[:-1](base_images)
     #print(f"VGG output shape: {vgg_output.shape}")
     # Flatten the output
     vgg_output = vgg_output.view(vgg_output.size(0), -1)
