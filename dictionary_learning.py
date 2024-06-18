@@ -1,16 +1,15 @@
+import os
+import torch
+import numpy as np
+from sklearn.decomposition import MiniBatchDictionaryLearning
+from torchvision.transforms.functional import adjust_sharpness
+from torchvision.io import read_image, ImageReadMode
+from PIL import Image
 
 # TESTING
 from AbsorptionMatrices import Circle
 from sklearn.feature_extraction.image import extract_patches_2d
-from sklearn.feature_extraction.image import reconstruct_from_patches_2d
 import matplotlib.pyplot as plt
-
-import torch
-import torchvision
-import torchvision.transforms as transforms
-
-import numpy as np
-from sklearn.decomposition import MiniBatchDictionaryLearning
 
 def extract_patches_2d_pt(image, patch_size=8):
     """ A Pytorch implementation of extract_patches_2d.
@@ -69,10 +68,9 @@ def remove_noise_from_image_dl_pt(image, dictionary, patch_size=8):
     # Minmax scale
     image_reco = (image_reco - image_reco.min()) / (image_reco.max() - image_reco.min())
     # Otsu's thresholding
-    thresh = torch.mean(image_reco)
+    thresh = 0.5
     image_reco = torch.where(image_reco > thresh, torch.tensor(1.0), torch.tensor(0.0))
     return image_reco
-        
 
 def learn_dictionary(images, n_components, alpha, batch_size, patch_size=8):
     """ Learn a dictionary from the images
@@ -141,8 +139,40 @@ def shuffle_local_pixels(image, area=16, shuffle_chance=0.5):
                 shuffled_image[i:i+area, j:j+area] = np.random.permutation(shuffled_image[i:i+area, j:j+area].ravel()).reshape(area, area)
     return shuffled_image
 
+def load_htc_images(path):
+    base_image_paths = list(filter(lambda x: "recon" in x, os.listdir(path)))
+    base_image_paths = base_image_paths[0:10]
+    # Load the numpy arrays
+    base_images = []
+    for image_path in base_image_paths:
+        img = read_image(os.path.join(path, image_path), mode=ImageReadMode.GRAY)
+        img = torch.tensor(img, dtype=torch.float32)
+        img = img.squeeze()
+        #print(f"Image shape: {img.shape}")
+        base_images.append(img)
+        
+    return base_images
+
+def get_htc_scan(level = 1, sample = "a"):
+    base_path = "/home/ilmari/python/limited-angle-tomography/htc2022_test_data/"
+    # htc2022_01a_recon_fbp_seg.png
+    htc_file = f"htc2022_0{level}{sample}_recon_fbp_seg.png"
+    #sinogram_file = f"htc2022_0{level}{sample}_limited_sinogram.csv"
+    #angle_file = f"htc2022_0{level}{sample}_angles.csv"
+    #angle_file = os.path.join(base_path, angle_file)
+    
+    print(f"Loading sample {level}{sample}",end="")
+
+    # Read image
+    img = Image.open(os.path.join(base_path, htc_file))
+    img = np.array(img, dtype=np.float32)
+    # Scale to [0, 1] and binarize
+    #img = img / 255
+    #img = np.where(img > 0.5, 1, 0)
+    return img
+
 if __name__ == "__main__":
-    patch_size = 5
+    patch_size = 6
     # Create a basic circle image
     y = get_basic_circle_image()
     
@@ -150,7 +180,8 @@ if __name__ == "__main__":
     print(f"Pytorch extracted patches shape: {y_patches.shape}")
     
     # Load images as numpy arrays, and use sklearn to learn the dictionary.
-    images = [get_basic_circle_image() for _ in range(30)]
+    #images = [get_basic_circle_image() for _ in range(10)]
+    images = load_htc_images("HTC_files")
     images = np.array(images)
     basis = learn_dictionary(images, 4, 0.1, 1, patch_size)
     
@@ -160,8 +191,9 @@ if __name__ == "__main__":
     # to compute the sparse codes and remove noise from the image.
     basis = torch.tensor(basis)
     print(f"Basis shape: {basis.shape}")
-    test_img = get_basic_circle_image()
-    test_img_distorted = shuffle_local_pixels(test_img, area=16, shuffle_chance=0.3)
+
+    test_img = images[0]
+    test_img_distorted = shuffle_local_pixels(test_img, area=32, shuffle_chance=0.5)
     # Remove noise from the image
     reco = remove_noise_from_image_dl_pt(torch.tensor(test_img_distorted), basis, patch_size)
     reco = reco.numpy()
