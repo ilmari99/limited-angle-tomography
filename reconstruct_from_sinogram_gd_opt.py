@@ -33,6 +33,8 @@ from pytorch_models import (SequenceToImageCNN,
 from torchsummary import summary
 import torchvision
 import torchviz
+from IPython.display import display, clear_output
+import __main__ as MAIN_MODULE
 
 class ModelBase(nn.Module):
     """
@@ -333,7 +335,7 @@ def create_circle():
     return circle
 
 def get_htc_scan(level = 1, sample = "a", return_raw_sinogram = False,angles=[]):
-    base_path = "/home/ilmari/python/limited-angle-tomography/htc2022_test_data/"
+    base_path = "/home/ilmari/limited-angle-tomography/htc2022_test_data/"
     # htc2022_01a_recon_fbp_seg.png
     htc_file = f"htc2022_0{level}{sample}_recon_fbp_seg.png"
     sinogram_file = f"htc2022_0{level}{sample}_limited_sinogram.csv"
@@ -636,7 +638,7 @@ if __name__ == "__main__":
                         )
         optimizer = optim.Adam(model.parameters(), lr=0.4, amsgrad=True)
         #optimizer = optim.SGD(model.parameters(), lr=0.4)
-    #model.plot_edge_padding_mask()
+
     #model = PredictSinogramAndReconstruct(128, np.deg2rad(angles), image_mask=outer_mask, device='cuda')
     #model = BackprojectAndUNet(sinogram.shape[1], np.deg2rad(angles), a=filter_sinogram_of_predicted_image_with_a, image_mask=image_mask, device='cuda')
     model.to('cuda')
@@ -743,12 +745,8 @@ if __name__ == "__main__":
     regularization_loss_coeff = 1
     
     iteration_number = 0
+    #%%
     while True:
-        
-        # Alternate between optimizing criterion and regularization.
-        if iteration_number % 5 == 0 and iteration_number > 100:
-            criterion_loss_coeff = np.random.random()
-            regularization_loss_coeff = 1 - criterion_loss_coeff
 
 
         # The model returns the predicted image y_hat (y.shape)
@@ -767,7 +765,7 @@ if __name__ == "__main__":
         
         y_hat_noise_reduced = y_hat
         ######
-        y_hat_noise_reduced = remove_noise_from_image_dl_pt(y_hat,basis,patch_size=dl_patch_size,device="cuda")
+        y_hat_noise_reduced = remove_noise_from_image_dl_pt(pt.round(y_hat),basis,patch_size=dl_patch_size,device="cuda")
         dict_learn_noise_red_mae = pt.mean(pt.abs(y_hat_noise_reduced - y_hat))
         ######
         
@@ -874,19 +872,11 @@ if __name__ == "__main__":
             loss_fig.canvas.draw()
             loss_fig.canvas.flush_events()
             
-            noise_red_axes[0].matshow(y_hat_np)
+            noise_red_axes[0].matshow(y_hat_rounded_np)
             y_hat_noise_reduced_np = y_hat_noise_reduced.cpu().detach().numpy()
             noise_red_axes[1].matshow(y_hat_noise_reduced_np)
             noise_red_fig.canvas.draw()
             noise_red_fig.canvas.flush_events()
-            
-            if False:
-                fft_pred = np.fft.fftshift(np.fft.fft2(y_hat_np))
-                #print(fft_pred.shape)
-                fourier_axes[1].plot(np.abs(fft_pred[:,0]))
-                
-                fourier_fig.canvas.draw()
-                fourier_fig.canvas.flush_events()
             
             grad_axes[0].plot(regularization_gradients, color='blue')
             grad_axes[0].plot(loss_gradients, color='red')
@@ -903,8 +893,16 @@ if __name__ == "__main__":
             grad_img_axes.matshow(full_grad.cpu().detach().numpy())
             grad_img_fig.canvas.draw()
             grad_img_fig.canvas.flush_events()
-            
-            
+            # Whether we are running from notebook
+            if hasattr(MAIN_MODULE,"__file__"):
+                clear_output(wait = True)
+                display(noise_red_fig)
+                display(loss_fig)
+                display(image_fig)
+                display(grad_fig)
+                
+                
+                
             plt.pause(0.01)
             # Save figure to folder
             image_fig.savefig(f"to_gif/image{iteration_number}.jpg")
