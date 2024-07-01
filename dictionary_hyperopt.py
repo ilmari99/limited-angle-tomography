@@ -59,17 +59,17 @@ def reconstruct_from_patches_2d_pt(patches, image_size, device=None):
     """
     patch_size = patches.shape[-1]
     
-    #print(f"Patches shape: {patches.shape}")
+    print(f"Patches shape: {patches.shape}")
     patches = patches.reshape(-1, patch_size*patch_size)
     patches = patches.unsqueeze(0).permute(0, 2, 1)
-    #print(f"Patches shape: {patches.shape}")
+    print(f"Patches shape: {patches.shape}")
     counter_image = torch.ones_like(patches, device=device)
     #counter_image = torch.nn.functional.unfold(counter_image.unsqueeze(0).unsqueeze(0), patch_size, stride=1)
-    #print(f"Counter image shape: {counter_image.shape}")
+    print(f"Counter image shape: {counter_image.shape}")
     # Fold patches of ones to know how many patches overlap each pixel
     counter_image = torch.nn.functional.fold(counter_image, image_size, patch_size, stride=1)
     counter_image = counter_image.squeeze()
-    #print(f"Counter image shape: {counter_image.shape}")
+    print(f"Counter image shape: {counter_image.shape}")
     # fold the patches
     image = torch.nn.functional.fold(patches, image_size, patch_size, stride=1)
     image = image.squeeze()
@@ -86,9 +86,6 @@ def get_sparse_coeffs_pt(image, dictionary, patch_size=8, device=None):
     return sparse_codes
 
 def remove_noise_from_image_dl_pt(image, dictionary, patch_size=8,device=None):
-    #image = (image - image.min()) / (image.max() - image.min())
-    #image = torch.where(image > 0.5, 1, 0)
-    #return image
     sparse_codes = get_sparse_coeffs_pt(image, dictionary, patch_size,device=device)
     #print(f"Sparse codes shape: {sparse_codes.shape}")
     # Reconstruct the image
@@ -101,6 +98,7 @@ def remove_noise_from_image_dl_pt(image, dictionary, patch_size=8,device=None):
     #image_reco = image_reco.squeeze().squeeze()
     # Minmax scale
     image_reco = (image_reco - image_reco.min()) / (image_reco.max() - image_reco.min())
+    # Otsu's thresholding
     image_reco = torch.where(image_reco > 0.5, 1, 0)
     return image_reco
 
@@ -128,7 +126,7 @@ def learn_dictionary(images, n_components, alpha, patch_size=8):
                                              transform_n_nonzero_coefs=1,
                                              n_jobs=8,
                                              fit_algorithm="cd",
-                                             positive_code=True,
+                                             #positive_code=True,
                                              positive_dict=True,
                                              #tol=0.1,
     )
@@ -182,23 +180,12 @@ def shuffle_local_pixels(image, area=16, shuffle_chance=0.5):
         for j in range(0, image.shape[1], area):
             if np.random.rand() < shuffle_chance:
                 # Shuffle the pixels in the torch image
-                min_i_idx = i
-                max_i_idx = min(i + area, image.shape[0])
-                min_j_idx = j
-                max_j_idx = min(j + area, image.shape[1])
-                # Get the pixels
-                pixels = shuffled_image[min_i_idx:max_i_idx, min_j_idx:max_j_idx]
-                # Shuffle the pixels
-                pixels = pixels.flatten()
-                np.random.shuffle(pixels)
-                pixels = pixels.reshape(max_i_idx-min_i_idx, max_j_idx-min_j_idx)
-                shuffled_image[min_i_idx:max_i_idx, min_j_idx:max_j_idx] = pixels
-                
+                shuffled_image[i:i+area, j:j+area] = np.random.permutation(shuffled_image[i:i+area, j:j+area].ravel()).reshape(area, area)
     return shuffled_image
 
 def load_htc_images(path,device=None):
     base_image_paths = list(filter(lambda x: "recon" in x, os.listdir(path)))
-    #base_image_paths = base_image_paths[0:10]
+    base_image_paths = base_image_paths[0:10]
     # Load the numpy arrays
     base_images = []
     for image_path in base_image_paths:
@@ -229,55 +216,59 @@ def get_htc_scan(level = 1, sample = "a"):
     return img
 
 if __name__ == "__main__":
+
     torch.set_default_device('cuda')
     
-    patch_size = 8
-    num_components = 9
-    dl_alpha = 4.0
-    # Load images as numpy arrays, and use sklearn to learn the dictionary.
-    #images = [get_basic_circle_image() for _ in range(10)]
-    images = load_htc_images("HTC_files_and_a_samples")
+    patch_sizes = [4, 6, 8, 10, 12, 14]
+    num_components = [4, 6, 8, 10, 12, 14]
+    dl_alpha = [0.9, 1.2, 1.6, 2.0, 2.4, 2.8, 3.2, 3.8, 4.4, 5.0]
+    result_dict = {}
+    
+    images = load_htc_images("HTC_files")
     if images[0].device.type == 'cuda':
         images = [img.cpu().numpy() for img in images]
     images = np.array(images)
-    basis = learn_dictionary(images, num_components, dl_alpha, patch_size)
+    for alpha in dl_alpha:
+        for patch_size in patch_sizes:
+            for n_components in num_components:
+                print(f"Patch size: {patch_size}, Number of components: {n_components}")
+                
+                basis = learn_dictionary(images, n_components, alpha, patch_size)
+                
+                _,_ = plot_dictionary(basis, patch_size)
+                #plt.show()
+                #exit()
+                
+                # When we have learned the dictionary, we convert it to a torch tensor, which we can use
+                # to compute the sparse codes and remove noise from the image.
+                basis = torch.tensor(basis)
+                print(f"Basis shape: {basis.shape}")
+            
+                test_img = get_htc_scan(7, "a")
+                test_img_distorted = shuffle_local_pixels(test_img, area=32, shuffle_chance=0.4)
+                # Remove noise from the image
+                reco = remove_noise_from_image_dl_pt(torch.tensor(test_img_distorted), basis, patch_size)
+                if reco.device.type == 'cuda':
+                    reco = reco.cpu()
+                reco = reco.numpy()
+                
+                l1_norm_dist = np.sum(np.abs(test_img - test_img_distorted))
+                print(f"L1 norm between original and distorted: {l1_norm_dist}")
+                l2_norm_dist = np.sum((test_img - test_img_distorted) ** 2)
+                print(f"L2 norm between original and distorted: {l2_norm_dist}")
+                
+                l1_norm = np.sum(np.abs(test_img - reco))
+                print(f"L1 norm between original and reconstructed: {l1_norm}")
+                l2_norm = np.sum((test_img - reco) ** 2)
+                print(f"L2 norm between original and reconstructed: {l2_norm}")
+                result_dict[(patch_size, n_components,alpha)] = (l1_norm, l2_norm, l1_norm_dist, l2_norm_dist)
+    print(f"Results: {result_dict}")
+    # Sort the dict based on the L1 norm
+    sorted_results = sorted(result_dict.items(), key=lambda x: x[1][0])
+    print(f"Sorted results: {sorted_results}")
+    best_params = sorted_results[0][0]
+    print(f"Best parameters: {best_params}")
     
-    _,_ = plot_dictionary(basis, patch_size)
-    #plt.show()
-    #exit()
-    
-    # When we have learned the dictionary, we convert it to a torch tensor, which we can use
-    # to compute the sparse codes and remove noise from the image.
-    basis = torch.tensor(basis)
-    print(f"Basis shape: {basis.shape}")
-
-    test_img = get_htc_scan(7, "b")
-    test_img_distorted = shuffle_local_pixels(test_img, area=16, shuffle_chance=0.5)
-    # Remove noise from the image
-    reco = remove_noise_from_image_dl_pt(torch.tensor(test_img_distorted), basis, patch_size)
-    if reco.device.type == 'cuda':
-        reco = reco.cpu()
-    reco = reco.numpy()
-    
-    l1_norm_dist = np.sum(np.abs(test_img - test_img_distorted))
-    print(f"L1 norm between original and distorted: {l1_norm_dist}")
-    l2_norm_dist = np.sum((test_img - test_img_distorted) ** 2)
-    print(f"L2 norm between original and distorted: {l2_norm_dist}")
-    
-    l1_norm = np.sum(np.abs(test_img - reco))
-    print(f"L1 norm between original and reconstructed: {l1_norm}")
-    l2_norm = np.sum((test_img - reco) ** 2)
-    print(f"L2 norm between original and reconstructed: {l2_norm}")
-    
-    fig, ax = plt.subplots(1, 3)
-    ax[0].imshow(test_img, cmap='gray')
-    ax[0].set_title("Original Image")
-    ax[1].imshow(test_img_distorted, cmap='gray')
-    ax[1].set_title("Distorted Image")
-    ax[2].imshow(reco, cmap='gray')
-    ax[2].set_title("Reconstructed Image")
-    
-    plt.show()
     
     
     

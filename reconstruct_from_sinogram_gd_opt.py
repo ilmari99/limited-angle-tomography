@@ -18,6 +18,7 @@ from utils import filter_sinogram
 from utils import FBPRadon, FBPRadonFanbeam
 from pytorch_msssim import ssim, ms_ssim
 import phantominator as ph
+from dictionary_learning import learn_dictionary, remove_noise_from_image_dl_pt
 from regularization import (vector_similarity_regularization,
                             number_of_edges_regularization,
                             binary_regularization,
@@ -439,7 +440,8 @@ def load_base_images(path, to_tensor=True, to_3d=True):
 
 def load_htc_images(path):
     base_image_paths = list(filter(lambda x: "recon" in x, os.listdir(path)))
-    base_image_paths = base_image_paths[0:10]
+    print(f"Loading images: {base_image_paths}")
+    #base_image_paths = base_image_paths[0:10]
     # Load the numpy arrays
     base_images = []
     for image_path in base_image_paths:
@@ -531,12 +533,16 @@ def regularization(y_hat, base_images = None):
     
 
 if __name__ == "__main__":
-    
-    htc_level = 5
-    htc_sample = "a"
+    #pt.set_default_device('cuda')
+    htc_level = 6
+    htc_sample = "b"
     filter_raw_sinogram_with_a = 5.5
     filter_sinogram_of_predicted_image_with_a = 5.5
-    criterion = LPLoss(p=2)
+    dl_patch_size = 8
+    dl_components = 6
+    dl_alpha = 4.4
+    dl_coefficient = 0.005
+    criterion = LPLoss(p=1)
     #criterion = nn.MSELoss()
     trim_sinogram = True
     pad_y_and_mask = False
@@ -547,19 +553,21 @@ if __name__ == "__main__":
     edge_pad_size = 0
     use_no_model = True
     sinogram_noise_std = 0.0
-    perceptual_index = pyiqa.create_metric("topiq_nr", as_loss=True, device="cuda")
-    print(perceptual_index.lower_better)
+    #perceptual_index = pyiqa.create_metric("topiq_nr", as_loss=True, device="cuda")
+    #print(perceptual_index.lower_better)
     
     #base_images = load_base_images("Circles128x128_1000", to_tensor=True, to_3d=True)
     base_images = load_htc_images("HTC_files")
-    base_images = [pt.tensor(img, dtype=pt.float32, device="cuda")/255 for img in base_images]
+    base_images = [pt.tensor(img, dtype=pt.float32, device="cpu")/255 for img in base_images]
+    basis = learn_dictionary(np.array(base_images),n_components=dl_components, alpha=dl_alpha, patch_size=dl_patch_size)
+    basis = pt.tensor(basis,device="cuda",dtype=pt.float32)
     #base_images = [img.unsqueeze(-1) for img in base_images]
     #base_images = [pt.cat([img, img, img], dim=-1) for img in base_images]
     #print(base_images[0].shape)
     #base_images = pt.stack(base_images, dim=0)
     #base_images = base_images.reshape(4,3,512,512)
     #print(f"Base images shape: {base_images.shape}")
-    regularization_ = lambda x : regularization(x,base_images=base_images)# + 0.001*(1 - perceptual_index(pt.reshape(x,(1,1,x.shape[0], x.shape[1]))))
+    regularization_ = lambda x : regularization(x,base_images=base_images)
     
     #angles = HTC_LEVEL_TO_ANGLES[htc_level]
     sinogram = None
@@ -626,7 +634,8 @@ if __name__ == "__main__":
                         device='cuda',
                         edge_pad_size=edge_pad_size
                         )
-        optimizer = optim.Adam(model.parameters(), lr=0.5, amsgrad=True)
+        optimizer = optim.Adam(model.parameters(), lr=0.4, amsgrad=True)
+        #optimizer = optim.SGD(model.parameters(), lr=0.4)
     #model.plot_edge_padding_mask()
     #model = PredictSinogramAndReconstruct(128, np.deg2rad(angles), image_mask=outer_mask, device='cuda')
     #model = BackprojectAndUNet(sinogram.shape[1], np.deg2rad(angles), a=filter_sinogram_of_predicted_image_with_a, image_mask=image_mask, device='cuda')
@@ -691,24 +700,57 @@ if __name__ == "__main__":
     loss_axes[1].set_xlabel("Iteration number")
     loss_axes[1].set_ylabel("Loss")
     
-    fourier_fig, fourier_axes = plt.subplots(1,2, figsize=(10,5))
-    fft_true = np.fft.fftshift(np.fft.fft2(y_np))
-    fourier_axes[0].plot(np.abs(fft_true[:,0]))
-    fourier_axes[0].set_title("Fourier transform of true image")
-    fourier_axes[0].set_xlabel("Frequency")
-    fourier_axes[0].set_ylabel("Magnitude")
-    fourier_axes[1].set_title("Fourier transform of predicted image")
-    fourier_axes[1].set_xlabel("Frequency")
-    fourier_axes[1].set_ylabel("Magnitude")
+    if False:
+        fourier_fig, fourier_axes = plt.subplots(1,2, figsize=(10,5))
+        fft_true = np.fft.fftshift(np.fft.fft2(y_np))
+        fourier_axes[0].plot(np.abs(fft_true[:,0]))
+        fourier_axes[0].set_title("Fourier transform of true image")
+        fourier_axes[0].set_xlabel("Frequency")
+        fourier_axes[0].set_ylabel("Magnitude")
+        fourier_axes[1].set_title("Fourier transform of predicted image")
+        fourier_axes[1].set_xlabel("Frequency")
+        fourier_axes[1].set_ylabel("Magnitude")
+    
+    # Plot the current prediction, and the prediction after noise reduction with basis
+    noise_red_fig, noise_red_axes = plt.subplots(1,2, figsize=(10,5))
+    noise_red_axes[0].set_title("Predicted image")
+    noise_red_axes[1].set_title("Noise reduced image")
+    
+    # Plot the magnitude of the gradients during training
+    grad_fig, grad_axes = plt.subplots(1,2, figsize=(10,5))
+    grad_axes[0].set_title("Loss and regularization gradients")
+    grad_axes[0].set_xlabel("Iteration number")
+    grad_axes[0].set_ylabel("Gradient magnitude")
+    grad_axes[1].set_title("Regularization gradient / Loss gradient")
+    grad_axes[1].set_xlabel("Iteration number")
+    grad_axes[1].set_ylabel("Ratio")
+    
+    # Plot the full gradient
+    grad_img_fig, grad_img_axes = plt.subplots()
+    grad_img_axes.set_title("Gradient image")
+    
+    
 
     reconstruction_errors = []
     criterion_losses = []
     regularization_losses = []
     total_losses = []
+    regularization_gradients = []
+    loss_gradients = []
+    regularization_grad_compared_to_loss_grad = []
+    full_grad = pt.zeros(y.shape, device='cuda')
+    criterion_loss_coeff = 1
+    regularization_loss_coeff = 1
     
     iteration_number = 0
     while True:
         
+        # Alternate between optimizing criterion and regularization.
+        if iteration_number % 5 == 0 and iteration_number > 100:
+            criterion_loss_coeff = np.random.random()
+            regularization_loss_coeff = 1 - criterion_loss_coeff
+
+
         # The model returns the predicted image y_hat (y.shape)
         # and the predicted sinogram s (len(angles), y.shape[1])
         y_hat, s_hat = model(raw_sinogram)
@@ -723,13 +765,36 @@ if __name__ == "__main__":
         # minimize criterion
         criterion_loss = criterion(filtered_sinogram,s_hat)
         
-        regularization_loss = regularization_(y_hat)
+        y_hat_noise_reduced = y_hat
+        ######
+        y_hat_noise_reduced = remove_noise_from_image_dl_pt(y_hat,basis,patch_size=dl_patch_size,device="cuda")
+        dict_learn_noise_red_mae = pt.mean(pt.abs(y_hat_noise_reduced - y_hat))
+        ######
         
-        loss = criterion_loss + regularization_loss
+        regularization_loss = regularization_(y_hat) + dict_learn_noise_red_mae*dl_coefficient
+        
+        loss = criterion_loss_coeff * criterion_loss + regularization_loss_coeff * regularization_loss
         
         criterion_losses.append(criterion_loss.item())
         regularization_losses.append(regularization_loss.item())
         total_losses.append(loss.item())
+        
+        # Compute gradients
+        loss_grads = pt.autograd.grad(loss, model.parameters(), create_graph=True)
+        regularization_grads = pt.autograd.grad(regularization_loss, model.parameters(), create_graph=True)
+        full_grad = pt.cat([grad.view(-1) for grad in loss_grads]) + pt.cat([grad.view(-1) for grad in regularization_grads])
+        
+        # Calculate mean magnitude of gradients
+        loss_grad_magnitude = pt.mean(pt.abs(pt.cat([grad.view(-1) for grad in loss_grads])))
+        regularization_grad_magnitude = pt.mean(pt.abs(pt.cat([grad.view(-1) for grad in regularization_grads])))
+
+        
+        # Print mean magnitude of gradients
+        #print(f"Mean magnitude of loss gradients: {loss_grad_magnitude.item()}")
+        #print(f"Mean magnitude of regularization gradients: {regularization_grad_magnitude.item()}")
+        regularization_gradients.append(regularization_grad_magnitude.item())
+        loss_gradients.append(loss_grad_magnitude.item())
+        regularization_grad_compared_to_loss_grad.append(regularization_grad_magnitude.item() / loss_grad_magnitude.item())
         
         # Update the model
         optimizer.zero_grad()
@@ -787,7 +852,7 @@ if __name__ == "__main__":
             print(f"Reconstruction error between y and y_hat: {reconstruction_errors[-1]}")
             input("Press enter to continue")
         
-        elif iteration_number == 1 or iteration_number % 5 == 0:
+        elif iteration_number == 1 or iteration_number % 50 == 0:
             print(f"Reconstruction error between y and y_hat: {reconstruction_errors[-1]}")
             print(f"Loss between s and s_hat: {criterion_loss}")
             # Update the figure
@@ -809,12 +874,36 @@ if __name__ == "__main__":
             loss_fig.canvas.draw()
             loss_fig.canvas.flush_events()
             
-            fft_pred = np.fft.fftshift(np.fft.fft2(y_hat_np))
-            #print(fft_pred.shape)
-            fourier_axes[1].plot(np.abs(fft_pred[:,0]))
+            noise_red_axes[0].matshow(y_hat_np)
+            y_hat_noise_reduced_np = y_hat_noise_reduced.cpu().detach().numpy()
+            noise_red_axes[1].matshow(y_hat_noise_reduced_np)
+            noise_red_fig.canvas.draw()
+            noise_red_fig.canvas.flush_events()
             
-            fourier_fig.canvas.draw()
-            fourier_fig.canvas.flush_events()
+            if False:
+                fft_pred = np.fft.fftshift(np.fft.fft2(y_hat_np))
+                #print(fft_pred.shape)
+                fourier_axes[1].plot(np.abs(fft_pred[:,0]))
+                
+                fourier_fig.canvas.draw()
+                fourier_fig.canvas.flush_events()
+            
+            grad_axes[0].plot(regularization_gradients, color='blue')
+            grad_axes[0].plot(loss_gradients, color='red')
+            grad_axes[0].legend(["Regularization gradient", "Loss gradient"])
+            grad_axes[1].plot(regularization_grad_compared_to_loss_grad)
+            grad_fig.canvas.draw()
+            grad_fig.canvas.flush_events()
+            
+            # Multiply by mask, and minmax scale
+            full_grad = full_grad.view(y.shape)
+            full_grad = full_grad * image_mask
+            full_grad = (full_grad - pt.min(full_grad)) / (pt.max(full_grad) - pt.min(full_grad))
+            full_grad = full_grad * image_mask
+            grad_img_axes.matshow(full_grad.cpu().detach().numpy())
+            grad_img_fig.canvas.draw()
+            grad_img_fig.canvas.flush_events()
+            
             
             plt.pause(0.01)
             # Save figure to folder

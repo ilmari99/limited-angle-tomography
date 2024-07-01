@@ -136,32 +136,73 @@ def detect_corners(y_hat, transpose_kernel=False):
     return corner_matrix
 
 
+def shuffle_local_pixels(image, area=16, shuffle_chance=0.5):
+    """ Shuffle the pixels in a local area of the image
+    """
+    shuffled_image = image.copy()
+    for i in range(0, image.shape[0], area):
+        for j in range(0, image.shape[1], area):
+            if np.random.rand() < shuffle_chance:
+                # Shuffle the pixels in the torch image
+                shuffled_image[i:i+area, j:j+area] = np.random.permutation(shuffled_image[i:i+area, j:j+area].ravel()).reshape(area, area)
+    return shuffled_image
+
 if __name__ == "__main__":
     # Test the htc scan
-    y, outer_mask, sinogram, angles = get_htc_scan(level=4, sample="a", return_raw_sinogram=True)
+    y, outer_mask, sinogram, angles = get_htc_scan(level=7, sample="a", return_raw_sinogram=True)
+    #y = shuffle_local_pixels(y.cpu().detach().numpy(), area=16, shuffle_chance=0.5)
+    #y = torch.tensor(y, dtype=torch.float32, device='cuda')
+    # Calculate the FFT of y, and plot the largest frequencies
+    y_fft = torch.fft.fftn(y)
+    print(f"Shape of y_fft: {y_fft.shape}, dtype: {y_fft.dtype}")
+    # Calculate the magnitude
+    y_fft_abs = torch.abs(y_fft)
+    y_fft_abs_hist = y_fft_abs.cpu().detach().numpy().ravel()
+    plt.hist(np.clip(y_fft_abs_hist, 0, 1000), bins=1000)
+    plt.title("Histogram of FFT Magnitudes")
+    # Calculate the log
+    y_fft_abs = torch.log(y_fft_abs + 1)
+    # Recreate the image using only the largest frequencies
+    # Set the largest 10% of the frequencies to the original values
+    y_fft_filt = y_fft * (y_fft_abs > torch.quantile(y_fft_abs, 0.9))
+    # Reconstruct the image
+    y_recon = torch.fft.ifftn(y_fft_filt)
+    y_recon = torch.abs(y_recon)
     
-    grad = spatial_gradient(y.reshape(1,1,y.shape[0],y.shape[1]), order=1)
-    grad = grad.squeeze()
-    grad = pt.abs(grad)
+    # Plot the 25 highest frequency waves
+    fig, ax = plt.subplots(5, 5)
+    # The total magnitude is the sum of the magnitudes of the x and y components
+    total_magnitude = torch.sqrt(y_fft_abs[0]**2 + y_fft_abs[1]**2)
+    for i in range(5):
+        for j in range(5):
+            idx = i * 5 + j
+            # Find the index of the idxth largest total magnitude
+            idx_max = torch.argsort(total_magnitude, descending=True)[idx]
+            print(f"Index of {idx}th largest magnitude: {idx_max}")
+            # Find the x and y components of the frequency
+            x_component = y_fft[0, idx_max]
+            y_component = y_fft[1, idx_max]
+            print(f"x component: {x_component}, y component: {y_component}")
+            # Calculate the magnitude
+            magnitude = torch.sqrt(x_component**2 + y_component**2)
+            print(f"Magnitude: {magnitude}")
+            # Calculate the time domain signal
+            signal = torch.fft.ifftn(torch.stack([x_component, y_component]))
+            signal = torch.abs(signal)
+            ax[i, j].imshow(signal.cpu().detach().numpy(), cmap='gray')
+            
+            
+            
+    # Plot the image
+    fig, ax = plt.subplots(1, 3)
+    ax[0].imshow(y.cpu().detach().numpy(), cmap='gray')
+    ax[0].set_title("Original Image")
     
-    xy_grad = grad[0] + grad[1]
+    ax[1].imshow(y_fft_abs.cpu().detach().numpy(), cmap='gray')
+    ax[1].set_title("FFT of Image")
     
-    grad_fig, grad_ax = plt.subplots(2,2)
-    
-    grad_ax[0][0].imshow(grad[0].cpu().detach().numpy())
-    grad_ax[0][0].set_title("Gradient x")
-    
-    grad_ax[0][1].imshow(grad[1].cpu().detach().numpy())
-    grad_ax[0][1].set_title("Gradient y")
-    
-    corner_matrix = detect_corners(y)
-    
-    grad_ax[1][0].imshow(corner_matrix.cpu().detach().numpy())
-    grad_ax[1][0].set_title("Corner matrix")
-    
-    corner_matrix = detect_corners(y, transpose_kernel=True) + corner_matrix
-    grad_ax[1][1].imshow(corner_matrix.cpu().detach().numpy())
-    grad_ax[1][1].set_title("Corner matrix (transposed)")
-    
-    plt.show()
+    # Plot reconstruction
+    ax[2].imshow(y_recon.cpu().detach().numpy(), cmap='gray')
+    ax[2].set_title("Reconstructed Image")
+    plt.show()#
     

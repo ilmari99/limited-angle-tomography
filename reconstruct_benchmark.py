@@ -11,7 +11,7 @@ import torch as pt
 
 import torch.nn as nn
 import torch.optim as optim
-from torchvision.io import read_image
+from torchvision.io import read_image, ImageReadMode
 import torchvision
 import numpy as np
 import matplotlib.pyplot as plt
@@ -23,6 +23,7 @@ import phantominator as ph
 from regularization import total_variation_regularization, vector_similarity_regularization, number_of_edges_regularization, binary_regularization
 from pytorch_models import HTCModel, SequenceToImageCNN, UNet, UNet2, SinogramCompletionTransformer, LSTMSinogram
 import imageio
+from dictionary_learning import learn_dictionary, remove_noise_from_image_dl_pt
 
 
 class ModelBase(nn.Module):
@@ -366,6 +367,21 @@ def load_base_images(path):
     print(f"Base images shape: {base_images.shape}")
     return base_images
 
+def load_htc_images(path):
+    base_image_paths = list(filter(lambda x: "recon" in x, os.listdir(path)))
+    print(f"Loading images: {base_image_paths}")
+    #base_image_paths = base_image_paths[0:10]
+    # Load the numpy arrays
+    base_images = []
+    for image_path in base_image_paths:
+        img = read_image(os.path.join(path, image_path), mode=ImageReadMode.GRAY)
+        img = pt.tensor(img, dtype=pt.float32, device='cuda')
+        img = img.squeeze()
+        #print(f"Image shape: {img.shape}")
+        base_images.append(img)
+        
+    return base_images
+
 def find_good_a(s, sinogram, device='cuda'):
     diffs = []
     sinograms = []
@@ -404,201 +420,232 @@ HTC_LEVEL_TO_ANGLES = {
 }
 
 if __name__ == "__main__":
+
     filter_raw_sinogram_with_a = 5.5
     filter_sinogram_of_predicted_image_with_a = 5.5
-    S_total_scores = []
-    time_limit_s = 30
-    image_folder = "BenchmarkReconstructionTVRegNoModelFilt55T30"
-    skip_done_tests = False
-    trim_sinogram = True
-    pad_y_and_mask = False
-    compare_s_score_to_unpadded = True
-    criterion = LPLoss(p=2.0)
+    time_limit_s = 45
+    dl_patch_size = 12
+    dl_components = 8
+    dl_alpha = 1
+    dl_coefficient = 0.03
     
-    def regularization(y_hat):
-        #return pt.tensor(0)
-        tv = total_variation_regularization(y_hat,normalize=True)
-        return tv
-    
-    os.makedirs(image_folder, exist_ok=True)
-    # Copy this file to the image folder
-    os.system(f"cp {__file__} {image_folder}")
-    
-    for htc_level in range(1,8):
-        S_total_scores.append(0)
-        for sample in ["a", "b", "c"]:
-            
-            best_image_name = f"best_image_htc_level_{htc_level}_sample_{sample}.png"
-            best_image_path = os.path.join(image_folder, best_image_name)
-            
-            gif_name = f"reconstruction_images_htc_level_{htc_level}_sample_{sample}.gif"
-            gif_path = os.path.join(image_folder, gif_name)
-            
-            plot_name = f"losses_htc_level_{htc_level}_sample_{sample}.png"
-            plot_path = os.path.join(image_folder, plot_name)
-            
-            # If all the files exist, skip this iteration
-            if skip_done_tests and os.path.exists(best_image_path) and os.path.exists(gif_path) and os.path.exists(plot_path):
-                continue
+    for filter_raw_sinogram_with_a in [5.5]:
+        filter_sinogram_of_predicted_image_with_a = filter_raw_sinogram_with_a
+        for dl_patch_size in [4,6]:#,6,8]:
+            for dl_components in [4,6,8]:#, 6, 8]:
+                for dl_alpha in [4.0,4.4,4.8]:#, 2.75, 2.5, 2.25, 2.0]:
+                    for dl_coefficient in [0.01, 0.02, 0.005]:#, 0.03, 0.05]:
+                        for p in [1.0]:#,2.0]:
+                            print(f"Filter raw sinogram with a: {filter_raw_sinogram_with_a}, filter sinogram of predicted image with a: {filter_sinogram_of_predicted_image_with_a}, dl_patch_size: {dl_patch_size}, dl_components: {dl_components}, dl_alpha: {dl_alpha}, dl_coefficient: {dl_coefficient}")
 
-            angles = HTC_LEVEL_TO_ANGLES[htc_level]
-            y, image_mask, sinogram, angles = get_htc_scan(angles=angles, level=htc_level, sample=sample, return_raw_sinogram=True)
-            
-            assert not (trim_sinogram and pad_y_and_mask), "Cannot trim sinogram and pad y and mask"
-            if trim_sinogram:
-                # Trim the sinogram to have the same number of columns as y,
-                # because why would the sinogram have more columns than the image?
-                num_extra_cols = sinogram.shape[1] - y.shape[1]
-                if num_extra_cols != 0:
-                    rm_from_left = num_extra_cols // 2 - 1
-                    rm_from_right = num_extra_cols - rm_from_left
-                    sinogram = sinogram[:, rm_from_left:sinogram.shape[1]-rm_from_right]
-                    print(f"Trimmed sinogram to shape: {sinogram.shape}")
-                    
-            if pad_y_and_mask:
-                # Pad y to the number of columns in the sinogram
-                num_missing_rows = sinogram.shape[1] - y.shape[0]
-                num_missing_cols = sinogram.shape[1] - y.shape[1]
-                row_pad_up = num_missing_rows // 2
-                row_pad_down = num_missing_rows - row_pad_up
-                col_pad_left = num_missing_cols // 2
-                col_pad_right = num_missing_cols - col_pad_left
-                y_not_padded = y
-                y = pt.nn.functional.pad(y, (col_pad_left, col_pad_right, row_pad_up, row_pad_down))
-                image_mask = pt.nn.functional.pad(image_mask, (col_pad_left, col_pad_right, row_pad_up, row_pad_down))
-                print(f"Padded y and mask from {y_not_padded.shape} to {y.shape}")
+                            image_folder = f"BenchmarkReconstructionDLandTV_NoModel_Filt{filter_raw_sinogram_with_a}"
+                            image_folder += f"_DLPatch{dl_patch_size}_DLComp{dl_components}_DLAlpha{dl_alpha}_DLCoeff{dl_coefficient}_p{p}_time{time_limit_s}"
+                            skip_done_tests = False
+                            trim_sinogram = True
+                            pad_y_and_mask = False
+                            compare_s_score_to_unpadded = True
+                            criterion = LPLoss(p=p)
+                            
+                            base_images = load_htc_images("HTC_files")
+                            base_images = [pt.tensor(img, dtype=pt.float32, device="cpu")/255 for img in base_images]
+                            basis = learn_dictionary(np.array(base_images),n_components=dl_components, alpha=dl_alpha, patch_size=dl_patch_size)
+                            basis = pt.tensor(basis,device="cuda",dtype=pt.float32)
+                            
+                            def regularization(y_hat):
+                                #return pt.tensor(0)
+                                tv = total_variation_regularization(y_hat,normalize=True)
+                                return tv
+                            
+                            os.makedirs(image_folder, exist_ok=True)
+                            # Copy this file to the image folder
+                            os.system(f"cp {__file__} {image_folder}")
+                            S_total_scores = []
+                            
+                            for htc_level in range(5,8):
+                                S_total_scores.append(0)
+                                for sample in ["a", "b", "c"]:
+                                    
+                                    best_image_name = f"best_image_htc_level_{htc_level}_sample_{sample}.png"
+                                    best_image_path = os.path.join(image_folder, best_image_name)
+                                    
+                                    gif_name = f"reconstruction_images_htc_level_{htc_level}_sample_{sample}.gif"
+                                    gif_path = os.path.join(image_folder, gif_name)
+                                    
+                                    plot_name = f"losses_htc_level_{htc_level}_sample_{sample}.png"
+                                    plot_path = os.path.join(image_folder, plot_name)
+                                    
+                                    # If all the files exist, skip this iteration
+                                    if skip_done_tests and os.path.exists(best_image_path) and os.path.exists(gif_path) and os.path.exists(plot_path):
+                                        continue
 
-            #model = ReconstructFromSinogram(sinogram.shape[1],
-            #                    np.deg2rad(angles),
-            #                    a=filter_sinogram_of_predicted_image_with_a,
-            #                    image_mask=image_mask,
-            #                    device='cuda'
-            #                    )
-            model = NoModel(sinogram.shape[1], np.deg2rad(angles), a=filter_sinogram_of_predicted_image_with_a, image_mask=image_mask, device='cuda')
-            
-            #model = PredictSinogramAndReconstruct(128, np.deg2rad(angles), image_mask=outer_mask, device='cuda')
-            #model = BackprojectAndUNet(sinogram.shape[1], np.deg2rad(angles), a=filter_sinogram_of_predicted_image_with_a, image_mask=image_mask, device='cuda')
-            model.to('cuda')
-            optimizer = optim.Adam(model.parameters(), lr=0.9, amsgrad=True)
-            
-            raw_sinogram_mean = pt.mean(sinogram)
-            raw_sinogram_std = pt.std(sinogram)
-            raw_sinogram = sinogram
-            
-            if filter_raw_sinogram_with_a != 0:
-                filtered_sinogram = filter_sinogram(raw_sinogram,filter_raw_sinogram_with_a,device="cuda")
-            else:
-                filtered_sinogram = raw_sinogram
-        
-            filtered_sinogram_mean = pt.mean(filtered_sinogram)
-            filtered_sinogram_std = pt.std(filtered_sinogram)
+                                    angles = HTC_LEVEL_TO_ANGLES[htc_level]
+                                    y, image_mask, sinogram, angles = get_htc_scan(angles=angles, level=htc_level, sample=sample, return_raw_sinogram=True)
+                                    
+                                    assert not (trim_sinogram and pad_y_and_mask), "Cannot trim sinogram and pad y and mask"
+                                    if trim_sinogram:
+                                        # Trim the sinogram to have the same number of columns as y,
+                                        # because why would the sinogram have more columns than the image?
+                                        num_extra_cols = sinogram.shape[1] - y.shape[1]
+                                        if num_extra_cols != 0:
+                                            rm_from_left = num_extra_cols // 2 - 1
+                                            rm_from_right = num_extra_cols - rm_from_left
+                                            sinogram = sinogram[:, rm_from_left:sinogram.shape[1]-rm_from_right]
+                                            print(f"Trimmed sinogram to shape: {sinogram.shape}")
+                                            
+                                    if pad_y_and_mask:
+                                        # Pad y to the number of columns in the sinogram
+                                        num_missing_rows = sinogram.shape[1] - y.shape[0]
+                                        num_missing_cols = sinogram.shape[1] - y.shape[1]
+                                        row_pad_up = num_missing_rows // 2
+                                        row_pad_down = num_missing_rows - row_pad_up
+                                        col_pad_left = num_missing_cols // 2
+                                        col_pad_right = num_missing_cols - col_pad_left
+                                        y_not_padded = y
+                                        y = pt.nn.functional.pad(y, (col_pad_left, col_pad_right, row_pad_up, row_pad_down))
+                                        image_mask = pt.nn.functional.pad(image_mask, (col_pad_left, col_pad_right, row_pad_up, row_pad_down))
+                                        print(f"Padded y and mask from {y_not_padded.shape} to {y.shape}")
 
-            y_np = y.cpu().detach().numpy()
+                                    #model = ReconstructFromSinogram(sinogram.shape[1],
+                                    #                    np.deg2rad(angles),
+                                    #                    a=filter_sinogram_of_predicted_image_with_a,
+                                    #                    image_mask=image_mask,
+                                    #                    device='cuda'
+                                    #                    )
+                                    model = NoModel(sinogram.shape[1], np.deg2rad(angles), a=filter_sinogram_of_predicted_image_with_a, image_mask=image_mask, device='cuda')
+                                    
+                                    #model = PredictSinogramAndReconstruct(128, np.deg2rad(angles), image_mask=outer_mask, device='cuda')
+                                    #model = BackprojectAndUNet(sinogram.shape[1], np.deg2rad(angles), a=filter_sinogram_of_predicted_image_with_a, image_mask=image_mask, device='cuda')
+                                    model.to('cuda')
+                                    optimizer = optim.Adam(model.parameters(), lr=0.5, amsgrad=True)
+                                    
+                                    raw_sinogram_mean = pt.mean(sinogram)
+                                    raw_sinogram_std = pt.std(sinogram)
+                                    raw_sinogram = sinogram
+                                    
+                                    if filter_raw_sinogram_with_a != 0:
+                                        filtered_sinogram = filter_sinogram(raw_sinogram,filter_raw_sinogram_with_a,device="cuda")
+                                    else:
+                                        filtered_sinogram = raw_sinogram
+                                
+                                    filtered_sinogram_mean = pt.mean(filtered_sinogram)
+                                    filtered_sinogram_std = pt.std(filtered_sinogram)
 
-            iteration_number = 0
+                                    y_np = y.cpu().detach().numpy()
 
-            s_errors = []
-            mse_losses = []
-            regularization_losses = []
-            losses = []
-            
-            t_start = time.time()
-            
-            images = []
-            image_of_best_reconstruction = None
-            best_s_score = -1
-            
-            input_sinogram = raw_sinogram
-            while (time.time() - t_start < time_limit_s) and (not model.use_original or (iteration_number < 1)):
-                
-                print(f"Iteration {iteration_number}", end="\r")
-                y_hat, s_hat = model(input_sinogram)
-                y_hat = y_hat.reshape(y.shape)
-                s_hat = s_hat.reshape(input_sinogram.shape)
-                
-                # Calculate the loss between the
-                # sinogram of the predicted object, and the filtered sinogram
-                mse_loss = criterion(filtered_sinogram,s_hat)
-                
-                regularization_loss = regularization(y_hat)
-                
-                loss = mse_loss + regularization_loss
-                
-                mse_losses.append(mse_loss.item())
-                regularization_losses.append(regularization_loss.item())
-                losses.append(loss.item())
-                
-                # Update the model
-                # Retain grads
-                optimizer.zero_grad()
-                loss.backward(retain_graph=True)
-                optimizer.step()
-                
-                # Squeeze and detach
-                y_hat_np = y_hat.cpu().detach().numpy()
-                s_hat_np = s_hat.cpu().detach().numpy()
+                                    iteration_number = 0
 
-                M = np.zeros((2,2))
-                if compare_s_score_to_unpadded and pad_y_and_mask:
-                    print(f"Using original Y, and not the padded version")
-                    y_not_padded_np = y_not_padded.cpu().detach().numpy()
-                    y_hat_np = y_hat_np[row_pad_up:-row_pad_down, col_pad_left:-col_pad_right]
-                    y_np = y_not_padded_np
-                    
-                y_hat_np = np.clip(y_hat_np, 0, 1)
-                y_hat_np_rounded = np.round(y_hat_np)
+                                    s_errors = []
+                                    mse_losses = []
+                                    regularization_losses = []
+                                    losses = []
+                                    
+                                    t_start = time.time()
+                                    
+                                    images = []
+                                    image_of_best_reconstruction = None
+                                    best_s_score = -1
+                                    
+                                    input_sinogram = raw_sinogram
+                                    while (time.time() - t_start < time_limit_s) and (not model.use_original or (iteration_number < 1)):
+                                        
+                                        #print(f"Iteration {iteration_number}", end="\r")
+                                        y_hat, s_hat = model(input_sinogram)
+                                        y_hat = y_hat.reshape(y.shape)
+                                        s_hat = s_hat.reshape(input_sinogram.shape)
+                                        
+                                        # Calculate the loss between the
+                                        # sinogram of the predicted object, and the filtered sinogram
+                                        mse_loss = criterion(filtered_sinogram,s_hat)
+                                        
+                                        ######
+                                        y_hat_noise_reduced = remove_noise_from_image_dl_pt(y_hat,basis,patch_size=dl_patch_size,device="cuda")
+                                        dict_learn_noise_red_mae = pt.mean(pt.abs(y_hat_noise_reduced - y_hat))
+                                        ######
+                                
+                                        regularization_loss = regularization(y_hat) + dict_learn_noise_red_mae*dl_coefficient
+                                        
+                                        loss = mse_loss + regularization_loss
+                                        
+                                        mse_losses.append(mse_loss.item())
+                                        regularization_losses.append(regularization_loss.item())
+                                        losses.append(loss.item())
+                                        
+                                        # Update the model
+                                        # Retain grads
+                                        optimizer.zero_grad()
+                                        loss.backward(retain_graph=True)
+                                        optimizer.step()
+                                        
+                                        # Squeeze and detach
+                                        y_hat_np = y_hat.cpu().detach().numpy()
+                                        s_hat_np = s_hat.cpu().detach().numpy()
 
-                # M = [[TP, FN], [FP, TN]]
-                M[0,0] = np.sum(np.logical_and(y_np == 1, y_hat_np_rounded == 1))
-                M[0,1] = np.sum(np.logical_and(y_np == 1, y_hat_np_rounded == 0))
-                M[1,0] = np.sum(np.logical_and(y_np == 0, y_hat_np_rounded == 1))
-                M[1,1] = np.sum(np.logical_and(y_np == 0, y_hat_np_rounded == 0))
-                
-                # MCC
-                s_score = (M[0,0] * M[1,1] - M[1,0]*M[0,1]) / np.sqrt((M[0,0] + M[0,1]) * (M[1,0] + M[1,1]) * (M[0,0] + M[1,0]) * (M[0,1] + M[1,1]))
-                s_errors.append(s_score)
-                
-                iteration_number += 1
-                
-                if iteration_number % 30 == 0: 
-                    images.append(y_hat_np)
-                if s_score > best_s_score:
-                    best_s_score = s_score
-                    image_of_best_reconstruction = y_hat_np_rounded
-                
-            # After 1 minute, we find the lowest loss
-            min_loss = min(losses)
-            min_loss_idx = losses.index(min_loss)
-            selected_s_score = s_errors[min_loss_idx]
-            print(f"HTC level: {htc_level}, sample: {sample}, s_score: {selected_s_score}")
-            S_total_scores[-1] += selected_s_score
-            
-            # Save the best image
-            plt.imsave(best_image_path, image_of_best_reconstruction, cmap='gray')
-            
-            if len(images) > 1:
-                # Save the images as a gif
-                images = [255*img for img in images]
-                imageio.mimsave(gif_path, images)
-                
-                # Plot the losses
-                fig, ax = plt.subplots(2,2)
-                fig.suptitle(f"HTC level {htc_level}, sample {sample}")
-                ax[0][0].plot(mse_losses)
-                ax[0][0].set_title("Loss between sinograms")
-                ax[0][1].plot(regularization_losses)
-                ax[0][1].set_title("Regularization loss")
-                ax[1][0].plot(losses)
-                ax[1][0].set_title("Total loss")
-                ax[1][1].plot(s_errors)
-                ax[1][1].set_title("S score")
-                
-                # Save the plot
-                plt.savefig(plot_path)
-            plt.close()
-        print(f"HTC level {htc_level} total s_score: {S_total_scores[-1]}")
-        
-    print(f"All scores: {S_total_scores}")
+                                        M = np.zeros((2,2))
+                                        if compare_s_score_to_unpadded and pad_y_and_mask:
+                                            print(f"Using original Y, and not the padded version")
+                                            y_not_padded_np = y_not_padded.cpu().detach().numpy()
+                                            y_hat_np = y_hat_np[row_pad_up:-row_pad_down, col_pad_left:-col_pad_right]
+                                            y_np = y_not_padded_np
+                                            
+                                        y_hat_np = np.clip(y_hat_np, 0, 1)
+                                        y_hat_np_rounded = np.round(y_hat_np)
+
+                                        # M = [[TP, FN], [FP, TN]]
+                                        M[0,0] = np.sum(np.logical_and(y_np == 1, y_hat_np_rounded == 1))
+                                        M[0,1] = np.sum(np.logical_and(y_np == 1, y_hat_np_rounded == 0))
+                                        M[1,0] = np.sum(np.logical_and(y_np == 0, y_hat_np_rounded == 1))
+                                        M[1,1] = np.sum(np.logical_and(y_np == 0, y_hat_np_rounded == 0))
+                                        
+                                        # MCC
+                                        s_score = (M[0,0] * M[1,1] - M[1,0]*M[0,1]) / np.sqrt((M[0,0] + M[0,1]) * (M[1,0] + M[1,1]) * (M[0,0] + M[1,0]) * (M[0,1] + M[1,1]))
+                                        s_errors.append(s_score)
+                                        
+                                        iteration_number += 1
+                                        
+                                        if iteration_number % 30 == 0: 
+                                            images.append(y_hat_np)
+                                        if s_score > best_s_score:
+                                            best_s_score = s_score
+                                            image_of_best_reconstruction = y_hat_np_rounded
+                                        
+                                    # After 1 minute, we find the lowest loss
+                                    min_loss = min(losses)
+                                    min_loss_idx = losses.index(min_loss)
+                                    selected_s_score = s_errors[min_loss_idx]
+                                    print(f"HTC level: {htc_level}, sample: {sample}, s_score: {selected_s_score}")
+                                    with open(os.path.join(image_folder, "s_scores.txt"), "a") as f:
+                                        f.write(f"HTC level: {htc_level}, sample: {sample}, s_score: {selected_s_score}\n")
+                                    S_total_scores[-1] += selected_s_score
+                                    
+                                    # Save the best image
+                                    plt.imsave(best_image_path, image_of_best_reconstruction, cmap='gray')
+                                    
+                                    if len(images) > 1:
+                                        # Save the images as a gif
+                                        images = [255*img for img in images]
+                                        imageio.mimsave(gif_path, images)
+                                        
+                                        # Plot the losses
+                                        fig, ax = plt.subplots(2,2)
+                                        fig.suptitle(f"HTC level {htc_level}, sample {sample}")
+                                        ax[0][0].plot(mse_losses)
+                                        ax[0][0].set_title("Loss between sinograms")
+                                        ax[0][1].plot(regularization_losses)
+                                        ax[0][1].set_title("Regularization loss")
+                                        ax[1][0].plot(losses)
+                                        ax[1][0].set_title("Total loss")
+                                        ax[1][1].plot(s_errors)
+                                        ax[1][1].set_title("S score")
+                                        
+                                        # Save the plot
+                                        plt.savefig(plot_path)
+                                    plt.close()
+                                print(f"HTC level {htc_level} total s_score: {S_total_scores[-1]}")
+                                
+                            print(f"All scores: {S_total_scores}")
+                            with open(os.path.join(image_folder, "total_scores.txt"), "a") as f:
+                                f.write(str(S_total_scores))
+                            
             
             
             
