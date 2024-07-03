@@ -7,6 +7,7 @@ from AbsorptionMatrices import Circle
 
 import pyiqa
 import torch as pt
+
 import kornia
 import torch.nn as nn
 import torch.optim as optim
@@ -18,7 +19,7 @@ from utils import filter_sinogram
 from utils import FBPRadon, FBPRadonFanbeam
 from pytorch_msssim import ssim, ms_ssim
 import phantominator as ph
-from dictionary_learning import learn_dictionary, remove_noise_from_image_dl_pt
+from dictionary_learning import learn_dictionary, remove_noise_from_image_dl_pt, learn_dictionary_custom
 from regularization import (vector_similarity_regularization,
                             number_of_edges_regularization,
                             binary_regularization,
@@ -335,7 +336,7 @@ def create_circle():
     return circle
 
 def get_htc_scan(level = 1, sample = "a", return_raw_sinogram = False,angles=[]):
-    base_path = "/home/ilmari/limited-angle-tomography/htc2022_test_data/"
+    base_path = "/home/ilmari/python/limited-angle-tomography/htc2022_test_data/"
     # htc2022_01a_recon_fbp_seg.png
     htc_file = f"htc2022_0{level}{sample}_recon_fbp_seg.png"
     sinogram_file = f"htc2022_0{level}{sample}_limited_sinogram.csv"
@@ -494,6 +495,34 @@ def scale_to_mean_and_std(X, mean, std):
     X_scaled = X_standardized * std + mean
     return X_scaled
 
+def shuffle_local_pixels(image, area=16, shuffle_chance=0.5):
+    """ Shuffle the pixels in a local area of the image
+    """
+    
+    shuffled_image = image.clone()
+    for i in range(0, image.shape[0], area):
+        for j in range(0, image.shape[1], area):
+            if pt.rand(1).item() < shuffle_chance:
+                min_i_idx = i
+                max_i_idx = min(i + area, image.shape[0])
+                min_j_idx = j
+                max_j_idx = min(j + area, image.shape[1])
+                
+                # Get the pixels
+                pixels = shuffled_image[min_i_idx:max_i_idx, min_j_idx:max_j_idx]
+                
+                # Shuffle the pixels
+                pixels = pixels.flatten()
+                indices = pt.randperm(pixels.numel())
+                pixels = pixels[indices]
+                pixels = pixels.reshape(max_i_idx-min_i_idx, max_j_idx-min_j_idx)
+                
+                shuffled_image[min_i_idx:max_i_idx, min_j_idx:max_j_idx] = pixels
+                
+    return shuffled_image
+
+
+
 HTC_LEVEL_TO_ANGLES = {
     7 : np.linspace(0, 30, 60, endpoint=False),
     6 : np.linspace(0, 40, 80, endpoint=False),
@@ -507,7 +536,9 @@ HTC_LEVEL_TO_ANGLES = {
 def regularization(y_hat, base_images = None):
     #return pt.tensor(0)
     tv = total_variation_regularization(y_hat,normalize=True)
-    return tv
+    #num_edges_mat = number_of_edges_regularization(y_hat)
+    #num_edges_score = pt.mean(num_edges_mat)
+    return tv# + num_edges_mat
     ref_tvs = []
     ref_tiks = []
     ref_num_edges = []
@@ -535,15 +566,15 @@ def regularization(y_hat, base_images = None):
     
 
 if __name__ == "__main__":
-    #pt.set_default_device('cuda')
+    pt.set_default_device('cuda')
     htc_level = 6
     htc_sample = "b"
     filter_raw_sinogram_with_a = 5.5
     filter_sinogram_of_predicted_image_with_a = 5.5
-    dl_patch_size = 8
-    dl_components = 6
-    dl_alpha = 4.4
-    dl_coefficient = 0.005
+    dl_patch_size = 16
+    dl_components = 9
+    dl_alpha = 1
+    dl_coefficient = 0.1
     criterion = LPLoss(p=1)
     #criterion = nn.MSELoss()
     trim_sinogram = True
@@ -561,7 +592,7 @@ if __name__ == "__main__":
     #base_images = load_base_images("Circles128x128_1000", to_tensor=True, to_3d=True)
     base_images = load_htc_images("HTC_files")
     base_images = [pt.tensor(img, dtype=pt.float32, device="cpu")/255 for img in base_images]
-    basis = learn_dictionary(np.array(base_images),n_components=dl_components, alpha=dl_alpha, patch_size=dl_patch_size)
+    basis = learn_dictionary_custom(np.array(base_images),n_components=dl_components, alpha=dl_alpha, patch_size=dl_patch_size)
     basis = pt.tensor(basis,device="cuda",dtype=pt.float32)
     #base_images = [img.unsqueeze(-1) for img in base_images]
     #base_images = [pt.cat([img, img, img], dim=-1) for img in base_images]
@@ -637,7 +668,6 @@ if __name__ == "__main__":
                         edge_pad_size=edge_pad_size
                         )
         optimizer = optim.Adam(model.parameters(), lr=0.4, amsgrad=True)
-        #optimizer = optim.SGD(model.parameters(), lr=0.4)
 
     #model = PredictSinogramAndReconstruct(128, np.deg2rad(angles), image_mask=outer_mask, device='cuda')
     #model = BackprojectAndUNet(sinogram.shape[1], np.deg2rad(angles), a=filter_sinogram_of_predicted_image_with_a, image_mask=image_mask, device='cuda')
@@ -730,8 +760,6 @@ if __name__ == "__main__":
     # Plot the full gradient
     grad_img_fig, grad_img_axes = plt.subplots()
     grad_img_axes.set_title("Gradient image")
-    
-    
 
     reconstruction_errors = []
     criterion_losses = []
@@ -796,8 +824,25 @@ if __name__ == "__main__":
         
         # Update the model
         optimizer.zero_grad()
-        loss.backward(retain_graph=True)
+        loss.backward()
+        # Add noise to the gradients
+        if False and iteration_number % 200 == 0 and iteration_number > 0:
+            for param in model.parameters():
+                grad_mean = pt.mean(pt.abs(param.grad))
+                noise = pt.normal(0, grad_mean*10, size=param.grad.shape, device='cuda')
+                param.grad = param.grad + noise
+                print("Added noise to gradients shape: ", noise.shape)
+        # local shuffle the weights
+        if False and iteration_number % 500 == 0 and iteration_number > 0:
+            optimizer = optim.Adam(model.parameters(), lr=0.4, amsgrad=True)
+            for param in model.parameters():
+                param.data = shuffle_local_pixels(param.data, area=16, shuffle_chance=0.5)
         optimizer.step()
+    
+        
+            
+        #print(f"Loss: {loss.item()}")
+        
         
         #if scale_shat_to_same_mean_and_std:
         # Scale y_hat with minmax scaler
@@ -885,14 +930,15 @@ if __name__ == "__main__":
             grad_fig.canvas.draw()
             grad_fig.canvas.flush_events()
             
-            # Multiply by mask, and minmax scale
-            full_grad = full_grad.view(y.shape)
-            full_grad = full_grad * image_mask
-            full_grad = (full_grad - pt.min(full_grad)) / (pt.max(full_grad) - pt.min(full_grad))
-            full_grad = full_grad * image_mask
-            grad_img_axes.matshow(full_grad.cpu().detach().numpy())
-            grad_img_fig.canvas.draw()
-            grad_img_fig.canvas.flush_events()
+            if use_no_model:
+                # Multiply by mask, and minmax scale
+                full_grad = full_grad.view(y.shape)
+                full_grad = full_grad * image_mask
+                full_grad = (full_grad - pt.min(full_grad)) / (pt.max(full_grad) - pt.min(full_grad))
+                full_grad = full_grad * image_mask
+                grad_img_axes.matshow(full_grad.cpu().detach().numpy())
+                grad_img_fig.canvas.draw()
+                grad_img_fig.canvas.flush_events()
             # Whether we are running from notebook
             if hasattr(MAIN_MODULE,"__file__"):
                 clear_output(wait = True)

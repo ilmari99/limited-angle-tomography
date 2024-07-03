@@ -135,7 +135,59 @@ def learn_dictionary(images, n_components, alpha, patch_size=8):
     dictionary = dictionary.fit(patches)
     return dictionary.components_
 
+def learn_dictionary_custom(images, n_components, alpha, patch_size=8):
+    print(f"Images shape: {images.shape}")
+    print(f"Patch size: {patch_size}")
+    patches = []
+    for img in images:
+        img_patches = extract_patches_2d(img, (patch_size, patch_size))
+        patches.append(img_patches)
+    patches = np.array(patches)
+    print(f"Extracted patches from {len(images)} images: {patches.shape}")
+    # (n_images, n_patches_per_image, patch_size, patch_size)
+    # Reshape the patches to (n_patches_per_image * n_images, patch_size * patch_size)
+    patches = patches.reshape(patches.shape[0]*patches.shape[1], -1)
+    print(f"Reshaped patches to: {patches.shape}")
+    # Now, we want to minimize the following cost function:
+    # ||X - D * Z||^2 + alpha * ||Z||_0
+    # where X is the patches, D is the dictionary, and Z is the sparse codes.
+    # We can solve this using gradient descent.
+    # X has the patches (n_patches, patch_size * patch_size)
+    X = torch.tensor(patches, dtype=torch.float32)
+    # D is the dictionary that has the base components (n_components, patch_size * patch_size)
+    D = torch.randn(n_components, patch_size * patch_size, dtype=torch.float32, requires_grad=True)
+    # Initialize D as randomly selected True patches
+    #D = torch.tensor(patches[np.random.choice(patches.shape[0], n_components, replace=False)], dtype=torch.float32, requires_grad=True)
+    
+    # Z has the sparse codes for each patch (n_patches, n_components)
+    Z = torch.randn(X.shape[0], n_components, dtype=torch.float32, requires_grad=True)
+    
+    # We can now minimize the cost function using gradient descent
+    # We will use the Adam optimizer
+    optimizer = torch.optim.Adam([D, Z], lr=0.1)
+    # L0 norm is the number of non-zero elements in the sparse codes
+    sparsity_term = torch.nn.L1Loss()
+    # We will use the L2 norm as the reconstruction term
+    l2_norm = torch.nn.MSELoss()
+    n_epochs = 5000
+    for epoch in range(n_epochs):
+        optimizer.zero_grad()
+        # Compute the cost function
+        cost = l2_norm(X, torch.mm(Z, D)) + alpha * sparsity_term(Z, torch.zeros_like(Z))
+        cost.backward()
+        optimizer.step()
+        if epoch % 10 == 0:
+            print(f"Epoch {epoch}, cost: {cost}")
+    return D.detach().cpu().numpy().astype(np.float32)
+    
 
+    
+    
+    
+    
+    
+    
+    
 #TESTING
 def create_circle():
     circle = Circle(63)
@@ -231,16 +283,16 @@ def get_htc_scan(level = 1, sample = "a"):
 if __name__ == "__main__":
     torch.set_default_device('cuda')
     
-    patch_size = 8
+    patch_size = 16
     num_components = 9
-    dl_alpha = 4.0
+    dl_alpha = 1
     # Load images as numpy arrays, and use sklearn to learn the dictionary.
     #images = [get_basic_circle_image() for _ in range(10)]
-    images = load_htc_images("HTC_files_and_a_samples")
+    images = load_htc_images("HTC_files")
     if images[0].device.type == 'cuda':
         images = [img.cpu().numpy() for img in images]
     images = np.array(images)
-    basis = learn_dictionary(images, num_components, dl_alpha, patch_size)
+    basis = learn_dictionary_custom(images, num_components, dl_alpha, patch_size)
     
     _,_ = plot_dictionary(basis, patch_size)
     #plt.show()
@@ -252,12 +304,51 @@ if __name__ == "__main__":
     print(f"Basis shape: {basis.shape}")
 
     test_img = get_htc_scan(7, "b")
+    
+    test_patches = extract_patches_2d_pt(torch.tensor(test_img,device="cpu"), patch_size, device="cpu")
+    #Shuffle patches
+    test_patches = test_patches.cpu().numpy()
+    test_patches = test_patches[np.random.permutation(test_patches.shape[0])]
+    # Plot 9 patches
+    patch_fig, patch_ax = plt.subplots(3, 3)
+    for i in range(3):
+        for j in range(3):
+            idx = i * 3 + j
+            patch_ax[i, j].imshow(test_patches[idx].squeeze(), cmap='gray')
+            patch_ax[i, j].axis('off')
+    #plt.show()
+    #exit()
+    
     test_img_distorted = shuffle_local_pixels(test_img, area=16, shuffle_chance=0.5)
     # Remove noise from the image
     reco = remove_noise_from_image_dl_pt(torch.tensor(test_img_distorted), basis, patch_size)
     if reco.device.type == 'cuda':
         reco = reco.cpu()
     reco = reco.numpy()
+    
+    # Select oner andom patch, and reconstruct it using the dictionary
+    patch = test_patches[0]
+    patch = torch.tensor(patch, device="cuda")
+    #patch = patch.unsqueeze(0)
+    #patch = patch.unsqueeze(0)
+    print(f"Patch shape: {patch.shape}")
+    sparse_codes = get_sparse_coeffs_pt(patch, basis, patch_size)
+    
+    # Reconstruct the patch
+    reco_patch = torch.mm(sparse_codes, basis)
+    reco_patch = reco_patch.reshape(-1, patch_size, patch_size)
+    reco_patch = reco_patch.squeeze().squeeze()
+    reco_patch = reco_patch.cpu().numpy()
+    # minmax scale
+    #reco_patch = (reco_patch - reco_patch.min()) / (reco_patch.max() - reco_patch.min())
+    # Plot the patch and the reconstructed patch
+    patch_reco_fig, patch_reco_ax = plt.subplots(1, 2)
+    patch_reco_ax[0].imshow(patch.squeeze().squeeze().cpu().numpy(), cmap='gray')
+    patch_reco_ax[0].set_title("Original Patch")
+    patch_reco_ax[1].imshow(reco_patch, cmap='gray')
+    patch_reco_ax[1].set_title("Reconstructed Patch")
+    patch_reco_fig.suptitle("Coeffs: " + str(sparse_codes))
+    #plt.show()
     
     l1_norm_dist = np.sum(np.abs(test_img - test_img_distorted))
     print(f"L1 norm between original and distorted: {l1_norm_dist}")
