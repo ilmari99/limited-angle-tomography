@@ -99,7 +99,7 @@ class ModelBase(nn.Module):
 class NoModel(nn.Module):
     """ No model, where we just optimize a circle (y_hat) to produce the sinogram.
     """
-    def __init__(self, proj_dim, angles, a = 0.1, image_mask=None, device="cuda", edge_pad_size=5):
+    def __init__(self, proj_dim, angles, a = 0.1, image_mask=None, device="cuda", edge_pad_size=5, scale_sinogram=True):
         self.dim = proj_dim
         self.angles = np.array(angles)
         self.output_image_shape = (self.dim, self.dim)
@@ -110,7 +110,7 @@ class NoModel(nn.Module):
         self.image_mask = image_mask
         self.y_hat = pt.tensor(image_mask, device=device, requires_grad=True)
         self.edge_pad_mask = self.get_edge_padding_mask(image_mask, pad_size=edge_pad_size)
-        self.radon_t = FBPRadon(proj_dim, self.angles, a = a, clip_to_circle=False, device=device)
+        self.radon_t = FBPRadon(proj_dim, self.angles, a = a, clip_to_circle=False, device=device, scale_sinogram=scale_sinogram)
         #self._set_step_size_angle()
         super(NoModel, self).__init__()
         
@@ -153,11 +153,6 @@ class NoModel(nn.Module):
         y_hat = self.y_hat
         #y_hat = pt.sigmoid(y_hat)
         y_hat = pt.sigmoid(y_hat)
-        #y_hat = 1/(1 + pt.exp(-2*(y_hat)))
-        #y_hat = kornia.filters.bilateral_blur(y_hat.unsqueeze(0).unsqueeze(0),
-        #                                      kernel_size=(3,3),
-        #                                        sigma_color=10.0,
-        #                                        sigma_space=(1.0,1.0))
         y_hat = self.image_mask * y_hat
         # Set all pixels that are in the edge_pad to 1
         y_hat = pt.where(self.edge_pad_mask == 1, pt.tensor(1.0, device='cuda'), y_hat)
@@ -534,11 +529,9 @@ HTC_LEVEL_TO_ANGLES = {
 }
 
 def regularization(y_hat, base_images = None):
-    #return pt.tensor(0)
+    #return pt.tensor(0, dtype=pt.float32)
     tv = total_variation_regularization(y_hat,normalize=True)
-    #num_edges_mat = number_of_edges_regularization(y_hat)
-    #num_edges_score = pt.mean(num_edges_mat)
-    return tv# + num_edges_mat
+    return tv
     ref_tvs = []
     ref_tiks = []
     ref_num_edges = []
@@ -574,8 +567,9 @@ if __name__ == "__main__":
     dl_patch_size = 16
     dl_components = 9
     dl_alpha = 1
-    dl_coefficient = 0.1
+    dl_coefficient = 0#.01
     criterion = LPLoss(p=1)
+    scale_sinogram = False
     #criterion = nn.MSELoss()
     trim_sinogram = True
     pad_y_and_mask = False
@@ -592,8 +586,10 @@ if __name__ == "__main__":
     #base_images = load_base_images("Circles128x128_1000", to_tensor=True, to_3d=True)
     base_images = load_htc_images("HTC_files")
     base_images = [pt.tensor(img, dtype=pt.float32, device="cpu")/255 for img in base_images]
-    basis = learn_dictionary_custom(np.array(base_images),n_components=dl_components, alpha=dl_alpha, patch_size=dl_patch_size)
-    basis = pt.tensor(basis,device="cuda",dtype=pt.float32)
+    basis = None
+    if dl_coefficient != 0:
+        basis = learn_dictionary_custom(np.array(base_images),n_components=dl_components, alpha=dl_alpha, patch_size=dl_patch_size)
+        basis = pt.tensor(basis,dtype=pt.float32)
     #base_images = [img.unsqueeze(-1) for img in base_images]
     #base_images = [pt.cat([img, img, img], dim=-1) for img in base_images]
     #print(base_images[0].shape)
@@ -665,7 +661,8 @@ if __name__ == "__main__":
                         a=filter_sinogram_of_predicted_image_with_a,
                         image_mask=image_mask,
                         device='cuda',
-                        edge_pad_size=edge_pad_size
+                        edge_pad_size=edge_pad_size,
+                        scale_sinogram=scale_sinogram
                         )
         optimizer = optim.Adam(model.parameters(), lr=0.4, amsgrad=True)
 
@@ -691,6 +688,8 @@ if __name__ == "__main__":
     else:
         #raw_sinogram = raw_sinogram / 255
         filtered_sinogram = raw_sinogram
+    if scale_sinogram:
+        filtered_sinogram = (filtered_sinogram - pt.mean(filtered_sinogram)) / pt.std(filtered_sinogram)
         
     filtered_sinogram_mean = pt.mean(filtered_sinogram)
     filtered_sinogram_std = pt.std(filtered_sinogram)
@@ -743,10 +742,11 @@ if __name__ == "__main__":
         fourier_axes[1].set_xlabel("Frequency")
         fourier_axes[1].set_ylabel("Magnitude")
     
-    # Plot the current prediction, and the prediction after noise reduction with basis
-    noise_red_fig, noise_red_axes = plt.subplots(1,2, figsize=(10,5))
-    noise_red_axes[0].set_title("Predicted image")
-    noise_red_axes[1].set_title("Noise reduced image")
+    if dl_coefficient != 0:
+        # Plot the current prediction, and the prediction after noise reduction with basis
+        noise_red_fig, noise_red_axes = plt.subplots(1,2, figsize=(10,5))
+        noise_red_axes[0].set_title("Predicted image")
+        noise_red_axes[1].set_title("Noise reduced image")
     
     # Plot the magnitude of the gradients during training
     grad_fig, grad_axes = plt.subplots(1,2, figsize=(10,5))
@@ -791,13 +791,14 @@ if __name__ == "__main__":
         # minimize criterion
         criterion_loss = criterion(filtered_sinogram,s_hat)
         
+        regularization_loss = regularization_(y_hat)
+        
         y_hat_noise_reduced = y_hat
         ######
-        y_hat_noise_reduced = remove_noise_from_image_dl_pt(pt.round(y_hat),basis,patch_size=dl_patch_size,device="cuda")
-        dict_learn_noise_red_mae = pt.mean(pt.abs(y_hat_noise_reduced - y_hat))
-        ######
-        
-        regularization_loss = regularization_(y_hat) + dict_learn_noise_red_mae*dl_coefficient
+        if dl_coefficient != 0:
+            y_hat_noise_reduced = remove_noise_from_image_dl_pt(pt.round(y_hat),basis,patch_size=dl_patch_size,device="cuda")
+            dict_learn_noise_red_mae = pt.mean(pt.abs(y_hat_noise_reduced - y_hat))
+            regularization_loss = regularization_loss + dict_learn_noise_red_mae*dl_coefficient
         
         loss = criterion_loss_coeff * criterion_loss + regularization_loss_coeff * regularization_loss
         
@@ -807,7 +808,11 @@ if __name__ == "__main__":
         
         # Compute gradients
         loss_grads = pt.autograd.grad(loss, model.parameters(), create_graph=True)
-        regularization_grads = pt.autograd.grad(regularization_loss, model.parameters(), create_graph=True)
+        if regularization_loss != 0:
+            regularization_grads = pt.autograd.grad(regularization_loss, model.parameters(), create_graph=True)
+        else:
+            regularization_grads = [pt.zeros_like(grad) for grad in loss_grads]
+            
         full_grad = pt.cat([grad.view(-1) for grad in loss_grads]) + pt.cat([grad.view(-1) for grad in regularization_grads])
         
         # Calculate mean magnitude of gradients
@@ -917,11 +922,13 @@ if __name__ == "__main__":
             loss_fig.canvas.draw()
             loss_fig.canvas.flush_events()
             
-            noise_red_axes[0].matshow(y_hat_rounded_np)
-            y_hat_noise_reduced_np = y_hat_noise_reduced.cpu().detach().numpy()
-            noise_red_axes[1].matshow(y_hat_noise_reduced_np)
-            noise_red_fig.canvas.draw()
-            noise_red_fig.canvas.flush_events()
+            if dl_coefficient != 0:
+                noise_red_axes[0].matshow(y_hat_rounded_np)
+                y_hat_noise_reduced_np = y_hat_noise_reduced.cpu().detach().numpy()
+                noise_red_axes[1].matshow(y_hat_noise_reduced_np)
+                noise_red_fig.canvas.draw()
+                noise_red_fig.canvas.flush_events()
+            
             
             grad_axes[0].plot(regularization_gradients, color='blue')
             grad_axes[0].plot(loss_gradients, color='red')
@@ -942,7 +949,8 @@ if __name__ == "__main__":
             # Whether we are running from notebook
             if hasattr(MAIN_MODULE,"__file__"):
                 clear_output(wait = True)
-                display(noise_red_fig)
+                if dl_coefficient != 0:
+                    display(noise_red_fig)
                 display(loss_fig)
                 display(image_fig)
                 display(grad_fig)

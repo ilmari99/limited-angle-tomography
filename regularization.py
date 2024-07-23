@@ -11,7 +11,7 @@ def total_variation_regularization(mat, normalize=True, order=1):
     """ Calculate the total variation of an image
     """
     # Calculate the gradient
-    grad = spatial_gradient(mat.reshape(1,1,mat.shape[0],mat.shape[1]), order=order, mode="diff")
+    grad = spatial_gradient(mat.reshape(1,1,mat.shape[0],mat.shape[1]), order=order)
     grad = grad.squeeze()
     # Check that there are no NaN values
     assert not torch.isnan(grad).any(), "There are NaN values in the gradient"

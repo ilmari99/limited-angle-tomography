@@ -58,12 +58,13 @@ class FBPRadonFanbeam(RadonFanbeam):
         return s
         
 class FBPRadon(Radon):
-    def __init__(self, resolution, angles, a = 0.1, device='cuda', **kwargs):
+    def __init__(self, resolution, angles, a = 0.1, device='cuda',scale_sinogram=False, **kwargs):
         self.device = device
         super(FBPRadon, self).__init__(resolution=resolution, angles=angles, **kwargs)
         #self.filter = FourierFilters.construct_fourier_filter(size=resolution, filter_name='ramp')
         #print(f"Filter shape: {self.filter.shape}")
         self.a = a
+        self.scale_sinogram = scale_sinogram
         self.a = torch.tensor(a, device=device, dtype=torch.float32, requires_grad=False)
         
     def parameters(self):
@@ -73,8 +74,12 @@ class FBPRadon(Radon):
         s = super().forward(x)
         #self.a = torch.abs(self.a)
         if torch.equal(self.a, torch.tensor(0.0, device=self.device)):
+            if self.scale_sinogram:
+                s = (s - torch.min(s)) / (torch.max(s) - torch.min(s))
             return s
         s = filter_sinogram(s, a = self.a, device=self.device)
+        if self.scale_sinogram:
+            s = (s - torch.mean(s)) / torch.std(s)
         return s
 
 def remove_noise_from_measurements(measurements):

@@ -8,7 +8,7 @@ logs/
 limited-angle-tomography/*
 *.npy
 htc2022_test_data/
-BenchmarkReconstruction/
+BenchmarkReconstruction*/
 .vscode/
 Circles128x128_1000/
 

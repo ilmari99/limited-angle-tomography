@@ -132,10 +132,16 @@ def learn_dictionary(images, n_components, alpha, patch_size=8):
                                              positive_dict=True,
                                              #tol=0.1,
     )
-    dictionary = dictionary.fit(patches)
+    # Filter out the patches that only have one value
+    filtered_patches = []
+    for patch in patches:
+        if len(np.unique(patch)) > 1:
+            filtered_patches.append(patch)
+    filtered_patches = np.array(filtered_patches)
+    dictionary = dictionary.fit(filtered_patches)
     return dictionary.components_
 
-def learn_dictionary_custom(images, n_components, alpha, patch_size=8):
+def learn_dictionary_custom(images, n_components, alpha, patch_size=8, num_iters=500):
     print(f"Images shape: {images.shape}")
     print(f"Patch size: {patch_size}")
     patches = []
@@ -165,28 +171,25 @@ def learn_dictionary_custom(images, n_components, alpha, patch_size=8):
     # We can now minimize the cost function using gradient descent
     # We will use the Adam optimizer
     optimizer = torch.optim.Adam([D, Z], lr=0.1)
-    # L0 norm is the number of non-zero elements in the sparse codes
-    sparsity_term = torch.nn.L1Loss()
     # We will use the L2 norm as the reconstruction term
     l2_norm = torch.nn.MSELoss()
-    n_epochs = 5000
-    for epoch in range(n_epochs):
+    
+    # Split the patches to training and validation sets
+    X_train = X
+    for itern in range(num_iters):
         optimizer.zero_grad()
         # Compute the cost function
-        cost = l2_norm(X, torch.mm(Z, D)) + alpha * sparsity_term(Z, torch.zeros_like(Z))
+        loss = l2_norm(X_train, torch.mm(Z, D))
+        reg = torch.sum(torch.abs(Z)) / (Z.shape[0]*Z.shape[1])
+        print(f"Epoch {itern}, mse: {loss}, sparsity: {reg}")
+        cost = loss + alpha * reg
         cost.backward()
         optimizer.step()
-        if epoch % 10 == 0:
-            print(f"Epoch {epoch}, cost: {cost}")
+        
+        if itern % 10 == 0:
+            print(f"Epoch {itern}, cost: {cost}")
     return D.detach().cpu().numpy().astype(np.float32)
-    
 
-    
-    
-    
-    
-    
-    
     
 #TESTING
 def create_circle():
@@ -292,7 +295,7 @@ if __name__ == "__main__":
     if images[0].device.type == 'cuda':
         images = [img.cpu().numpy() for img in images]
     images = np.array(images)
-    basis = learn_dictionary_custom(images, num_components, dl_alpha, patch_size)
+    basis = learn_dictionary_custom(images, num_components, dl_alpha, patch_size, num_iters=500)
     
     _,_ = plot_dictionary(basis, patch_size)
     #plt.show()
