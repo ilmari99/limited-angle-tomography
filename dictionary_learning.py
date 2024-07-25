@@ -288,14 +288,14 @@ if __name__ == "__main__":
     
     patch_size = 16
     num_components = 9
-    dl_alpha = 1
+    dl_alpha = 10
     # Load images as numpy arrays, and use sklearn to learn the dictionary.
     #images = [get_basic_circle_image() for _ in range(10)]
     images = load_htc_images("HTC_files")
     if images[0].device.type == 'cuda':
         images = [img.cpu().numpy() for img in images]
     images = np.array(images)
-    basis = learn_dictionary_custom(images, num_components, dl_alpha, patch_size, num_iters=500)
+    basis = learn_dictionary(images, num_components, dl_alpha, patch_size)
     
     _,_ = plot_dictionary(basis, patch_size)
     #plt.show()
@@ -331,6 +331,9 @@ if __name__ == "__main__":
     
     # Select oner andom patch, and reconstruct it using the dictionary
     patch = test_patches[0]
+    while len(np.unique(patch)) < 2:
+        patch = test_patches[np.random.randint(0, test_patches.shape[0])]
+        
     patch = torch.tensor(patch, device="cuda")
     #patch = patch.unsqueeze(0)
     #patch = patch.unsqueeze(0)
