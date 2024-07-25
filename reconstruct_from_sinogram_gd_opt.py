@@ -24,7 +24,11 @@ from regularization import (vector_similarity_regularization,
                             number_of_edges_regularization,
                             binary_regularization,
                             total_variation_regularization,
-                            tikhonov_regularization)
+                            tikhonov_regularization,
+                            extract_patches_2d_pt,
+                            reconstruct_from_patches_2d_pt,
+                            PatchAutoencoder)
+
 from pytorch_models import (SequenceToImageCNN,
                             UNet,
                             UNet2,
@@ -152,7 +156,9 @@ class NoModel(nn.Module):
     def forward(self, s):
         y_hat = self.y_hat
         #y_hat = pt.sigmoid(y_hat)
+        # Instead of sigmoid, clip to 0,1
         y_hat = pt.sigmoid(y_hat)
+        #y_hat = pt.clip(y_hat, 0, 1)
         y_hat = self.image_mask * y_hat
         # Set all pixels that are in the edge_pad to 1
         y_hat = pt.where(self.edge_pad_mask == 1, pt.tensor(1.0, device='cuda'), y_hat)
@@ -531,37 +537,32 @@ HTC_LEVEL_TO_ANGLES = {
 def regularization(y_hat, base_images = None):
     #return pt.tensor(0, dtype=pt.float32)
     tv = total_variation_regularization(y_hat,normalize=True)
-    return tv
-    ref_tvs = []
-    ref_tiks = []
-    ref_num_edges = []
-    for image in base_images:
-        tv = total_variation_regularization(image, normalize=True)
-        tk = tikhonov_regularization(image)
-        ne = pt.mean(number_of_edges_regularization(image))
-        ref_tiks.append(tk)
-        ref_tvs.append(tv)
-        ref_num_edges.append(ne)
-    mean_tv = sum(ref_tvs) / len(ref_tvs)
-    mean_tk = sum(ref_tiks) / len(ref_tiks)
-    mean_ne = sum(ref_num_edges) / len(ref_num_edges)
-    tv = total_variation_regularization(y_hat,normalize=True)
-    #tv2 = total_variation_regularization(y_hat,normalize=True,order=2)
     #return tv
-    tik = tikhonov_regularization(y_hat)
-    ne = pt.mean(number_of_edges_regularization(y_hat))
-    #return tv + tik
-    #print(tv,tik)
-    tv = pt.abs(tv - mean_tv)
-    tik = pt.abs(tik - mean_tk)
-    ne = pt.abs(ne - mean_ne)
-    return tv + tik + ne
+    patches = extract_patches_2d_pt(y_hat, patch_size=32, stride=32, dtype=pt.float16, device="cpu")
+    #print(f"Patches shape: {patches.shape}")
+    non_empty_patches = patches
+    #print(f"Non empty patches shape: {non_empty_patches.shape}")
+    decoded_patches = []
+    # By batch
+    with pt.no_grad():
+        for i in range(0, non_empty_patches.shape[0], 32):
+            batch = non_empty_patches[i:i+32]
+            batch = batch.to(pt.float32).to('cuda')
+            decs = AUTOENCODER(batch)
+            decoded_patches.append(decs)
+        
+    decoded_patches = pt.cat(decoded_patches, dim=0)
+    decoded_patches = decoded_patches.squeeze().to('cpu')
+    #print(f"Decoded patches shape: {decoded_patches.shape}")
+    # Measure the difference between the patches and the decoded patches
+    diff = pt.linalg.norm(non_empty_patches - decoded_patches, dim=1).mean()
+    return 0.05*diff + tv
     
 
 if __name__ == "__main__":
     pt.set_default_device('cuda')
-    htc_level = 6
-    htc_sample = "b"
+    htc_level = 7
+    htc_sample = "a"
     filter_raw_sinogram_with_a = 5.5
     filter_sinogram_of_predicted_image_with_a = 5.5
     dl_patch_size = 16
@@ -580,6 +581,9 @@ if __name__ == "__main__":
     edge_pad_size = 0
     use_no_model = True
     sinogram_noise_std = 0.0
+    AUTOENCODER = PatchAutoencoder(32,4,"patch_autoencoder_P32_D4.pth")
+    AUTOENCODER = AUTOENCODER.eval()
+    
     #perceptual_index = pyiqa.create_metric("topiq_nr", as_loss=True, device="cuda")
     #print(perceptual_index.lower_better)
     
@@ -664,7 +668,7 @@ if __name__ == "__main__":
                         edge_pad_size=edge_pad_size,
                         scale_sinogram=scale_sinogram
                         )
-        optimizer = optim.Adam(model.parameters(), lr=0.4, amsgrad=True)
+        optimizer = optim.Adam(model.parameters(), lr=0.5)#, amsgrad=True)
 
     #model = PredictSinogramAndReconstruct(128, np.deg2rad(angles), image_mask=outer_mask, device='cuda')
     #model = BackprojectAndUNet(sinogram.shape[1], np.deg2rad(angles), a=filter_sinogram_of_predicted_image_with_a, image_mask=image_mask, device='cuda')
@@ -806,19 +810,24 @@ if __name__ == "__main__":
         regularization_losses.append(regularization_loss.item())
         total_losses.append(loss.item())
         
-        # Compute gradients
-        loss_grads = pt.autograd.grad(loss, model.parameters(), create_graph=True)
-        if regularization_loss != 0:
-            regularization_grads = pt.autograd.grad(regularization_loss, model.parameters(), create_graph=True)
-        else:
-            regularization_grads = [pt.zeros_like(grad) for grad in loss_grads]
+        try:
+            # Compute gradients
+            loss_grads = pt.autograd.grad(loss, model.parameters(), create_graph=True)
+            if regularization_loss != 0:
+                regularization_grads = pt.autograd.grad(regularization_loss, model.parameters(), create_graph=True)
+            else:
+                regularization_grads = [pt.zeros_like(grad) for grad in loss_grads]
+                
+            full_grad = pt.cat([grad.view(-1) for grad in loss_grads]) + pt.cat([grad.view(-1) for grad in regularization_grads])
             
-        full_grad = pt.cat([grad.view(-1) for grad in loss_grads]) + pt.cat([grad.view(-1) for grad in regularization_grads])
-        
-        # Calculate mean magnitude of gradients
-        loss_grad_magnitude = pt.mean(pt.abs(pt.cat([grad.view(-1) for grad in loss_grads])))
-        regularization_grad_magnitude = pt.mean(pt.abs(pt.cat([grad.view(-1) for grad in regularization_grads])))
-
+            # Calculate mean magnitude of gradients
+            loss_grad_magnitude = pt.mean(pt.abs(pt.cat([grad.view(-1) for grad in loss_grads])))
+            regularization_grad_magnitude = pt.mean(pt.abs(pt.cat([grad.view(-1) for grad in regularization_grads])))
+        except:
+            print("Error in computing gradients")
+            loss_grad_magnitude = pt.tensor(1, device='cuda')
+            regularization_grad_magnitude = pt.tensor(1, device='cuda')
+            full_grad = pt.ones(y.shape, device='cuda')
         
         # Print mean magnitude of gradients
         #print(f"Mean magnitude of loss gradients: {loss_grad_magnitude.item()}")
@@ -829,7 +838,7 @@ if __name__ == "__main__":
         
         # Update the model
         optimizer.zero_grad()
-        loss.backward()
+        loss.backward(retain_graph = True)
         # Add noise to the gradients
         if False and iteration_number % 200 == 0 and iteration_number > 0:
             for param in model.parameters():
