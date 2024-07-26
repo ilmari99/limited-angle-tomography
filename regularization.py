@@ -54,6 +54,38 @@ class PatchAutoencoder(torch.nn.Module):
             torch.nn.Sigmoid()
         )
         return encoder, decoder
+    
+    def remove_noise_from_img_differentiable(self, img, patch_size,stride=-1):
+        """ Remove noise from an image using the autoencoder.
+        """
+        if stride == -1:
+            stride = patch_size
+        patches = extract_patches_2d_pt(img, patch_size, stride=stride)
+        enc_dec = self(patches)
+        reconstructed = reconstruct_from_patches_2d_pt(enc_dec, img.shape, stride=stride)
+        return reconstructed
+    
+    def remove_noise_from_img(self, img, patch_size, stride, batch_size, patches_to_device='cuda', patches_to_dtype=torch.float32):
+        """ Remove noise from an image using the autoencoder.
+        """
+        # Extract patches
+        patches = extract_patches_2d_pt(img, patch_size, stride=stride, device=patches_to_device, dtype=patches_to_dtype)
+        batch_size = batch_size if batch_size > 0 else len(patches)
+        dec_patches = []
+        # Encode in batches
+        for i in range(0, len(patches), batch_size):
+            batch = patches[i:i+batch_size]
+            if patches_to_device != "cuda":
+                batch = batch.to("cuda")
+            if patches_to_dtype != torch.float32:
+                batch = batch.to(torch.float32)
+            dec = self(batch)
+            dec_patches.append(dec)
+        dec_patches = torch.cat(dec_patches, dim=0)
+        dec_patches = dec_patches.squeeze(1)
+        # Reconstruct the image
+        reconstructed = reconstruct_from_patches_2d_pt(dec_patches, img.shape, stride=stride)
+        return reconstructed
 
 def extract_patches_2d_pt(image, patch_size=8,device=None, dtype=None, stride=1):
     """ A Pytorch implementation of extract_patches_2d.

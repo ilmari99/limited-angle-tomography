@@ -1,4 +1,5 @@
 import os
+import random
 import torch
 import numpy as np
 from sklearn.decomposition import MiniBatchDictionaryLearning, DictionaryLearning
@@ -96,6 +97,38 @@ class PatchAutoencoder(torch.nn.Module):
             torch.nn.Sigmoid()
         )
         return encoder, decoder
+    
+    def remove_noise_from_img_differentiable(self, img, patch_size,stride=-1):
+        """ Remove noise from an image using the autoencoder.
+        """
+        if stride == -1:
+            stride = patch_size
+        patches = extract_patches_2d_pt(img, patch_size, stride=stride)
+        enc_dec = self(patches)
+        reconstructed = reconstruct_from_patches_2d_pt(enc_dec, img.shape, stride=stride)
+        return reconstructed
+    
+    def remove_noise_from_img(self, img, patch_size, stride, batch_size, patches_to_device='cuda', patches_to_dtype=torch.float32):
+        """ Remove noise from an image using the autoencoder.
+        """
+        # Extract patches
+        patches = extract_patches_2d_pt(img, patch_size, stride=stride, device=patches_to_device, dtype=patches_to_dtype)
+        batch_size = batch_size if batch_size > 0 else len(patches)
+        dec_patches = []
+        # Encode in batches
+        for i in range(0, len(patches), batch_size):
+            batch = patches[i:i+batch_size]
+            if patches_to_device != "cuda":
+                batch = batch.to("cuda")
+            if patches_to_dtype != torch.float32:
+                batch = batch.to(torch.float32)
+            dec = self(batch)
+            dec_patches.append(dec)
+        dec_patches = torch.cat(dec_patches, dim=0)
+        dec_patches = dec_patches.squeeze(1)
+        # Reconstruct the image
+        reconstructed = reconstruct_from_patches_2d_pt(dec_patches, img.shape, stride=stride)
+        return reconstructed
 
 #TESTING
 def create_circle():
@@ -167,6 +200,18 @@ def load_htc_images(path,device=None):
         #print(f"Image shape: {img.shape}")
         base_images.append(img)
     return base_images
+
+def load_generated_images(path,device=None):
+    images = []
+    for image_path in os.listdir(path):
+        if image_path.endswith(".png"):
+            img = read_image(os.path.join(path, image_path), mode=ImageReadMode.GRAY)
+            img = torch.tensor(img, dtype=torch.float32, device=device)
+            img = img.squeeze() / 255
+            # Round to 0 or 1
+            img = torch.round(img)
+            images.append(img)
+    return images
 
 def get_htc_scan(level = 1, sample = "a"):
     base_path = "/home/ilmari/python/limited-angle-tomography/htc2022_test_data/"
@@ -245,19 +290,17 @@ def training_loop(autoenc,
     return autoenc
 
 
-        
-
 if __name__ == "__main__":
-    patch_size = 32
-    num_latent = 4
+    patch_size = 40
+    num_latent = 5
     num_epochs = 25
     patience = 5
     restore_best = True
     learning_rate = 0.001
     batch_size = 64
     train_test_split = 0.7
-    load_pre_trained = ""#"patch_autoencoder.pth"
-    do_training = True
+    load_pre_trained = "patch_autoencoder_P40_D5_also_synth.pth"
+    do_training = False
     stride = 4
     
     torch.manual_seed(0)
@@ -272,9 +315,12 @@ if __name__ == "__main__":
     
     # Load images as numpy arrays, and use sklearn to learn the dictionary.
     #images = [get_basic_circle_image() for _ in range(10)]
-    images = load_htc_images("HTC_files")
+    images = load_generated_images("generated_data")    
     if images[0].device.type == 'cuda':
         images = [img.cpu().numpy() for img in images]
+    if not do_training:
+        images = random.choices(images, k = 3)
+    print(f"Loading {len(images)} images")
     images = np.array(images)
     
     images = [torch.tensor(img, dtype=torch.float32) for img in images]
@@ -342,32 +388,22 @@ if __name__ == "__main__":
         # Load an image
         img = get_htc_scan(7, "a")
         img_distorted = img
-        img_distorted = shuffle_local_pixels(img, area=patch_size // 2, shuffle_chance=0.3)
-        img_distorted = random_distort(img_distorted, factor=0.2)
+        img_distorted = shuffle_local_pixels(img, area=patch_size // 2, shuffle_chance=0.4)
+        img_distorted = random_distort(img_distorted, factor=0.1)
         
         img = torch.tensor(img, dtype=torch.float32)
         img_distorted = torch.tensor(img_distorted, dtype=torch.float32)
         print(f"Distorted image shape: {img_distorted.shape}")
         
-        # Extract patches
-        patches = extract_patches_2d_pt(img_distorted, patch_size, stride=stride)
-        # Encode the patches
-        #patches = patches.unsqueeze(1)
-        print(f"Patches shape: {patches.shape}")
-        dec_patches = []
-        # Encode in batches
-        for i in range(0, len(patches), batch_size):
-            dec = autoenc(patches[i:i+batch_size])
-            dec_patches.append(dec)
-        dec_patches = torch.cat(dec_patches, dim=0)
-        dec_patches = dec_patches.squeeze(1)
-        print(f"Decoded patches shape: {dec_patches.shape}")
-        # Reconstruct the image
-        reconstructed = reconstruct_from_patches_2d_pt(dec_patches, img.shape, stride=stride)
-        # Round the image
-        reconstructed = torch.round(reconstructed)
-        
-        
+        reconstructed = autoenc.remove_noise_from_img(img,
+                                                      patch_size,
+                                                      stride,
+                                                      batch_size,
+                                                      patches_to_device="cpu",
+                                                      patches_to_dtype=torch.bool
+                                                      )
+
+
         fig, ax = plt.subplots(1, 3)
         ax[0].matshow(img.cpu().numpy())
         ax[0].set_title("Original image")

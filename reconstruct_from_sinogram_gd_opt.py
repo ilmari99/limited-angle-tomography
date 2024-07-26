@@ -534,29 +534,19 @@ HTC_LEVEL_TO_ANGLES = {
     1 : np.linspace(0, 90, 180, endpoint=False)
 }
 
-def regularization(y_hat, base_images = None):
+def regularization(y_hat):
     #return pt.tensor(0, dtype=pt.float32)
     tv = total_variation_regularization(y_hat,normalize=True)
     #return tv
-    patches = extract_patches_2d_pt(y_hat, patch_size=32, stride=32, dtype=pt.float16, device="cpu")
-    #print(f"Patches shape: {patches.shape}")
-    non_empty_patches = patches
-    #print(f"Non empty patches shape: {non_empty_patches.shape}")
-    decoded_patches = []
-    # By batch
-    with pt.no_grad():
-        for i in range(0, non_empty_patches.shape[0], 32):
-            batch = non_empty_patches[i:i+32]
-            batch = batch.to(pt.float32).to('cuda')
-            decs = AUTOENCODER(batch)
-            decoded_patches.append(decs)
-        
-    decoded_patches = pt.cat(decoded_patches, dim=0)
-    decoded_patches = decoded_patches.squeeze().to('cpu')
-    #print(f"Decoded patches shape: {decoded_patches.shape}")
-    # Measure the difference between the patches and the decoded patches
-    diff = pt.linalg.norm(non_empty_patches - decoded_patches, dim=1).mean()
-    return 0.05*diff + tv
+    reconstruction = AUTOENCODER.remove_noise_from_img(y_hat,
+                                                 patch_size=40,
+                                                 stride=10,
+                                                 batch_size=128,
+                                                 patches_to_device='cpu',
+                                                 patches_to_dtype=pt.bool
+    )
+    diff = pt.mean(pt.abs(y_hat - reconstruction))
+    return diff + tv
     
 
 if __name__ == "__main__":
@@ -581,7 +571,7 @@ if __name__ == "__main__":
     edge_pad_size = 0
     use_no_model = True
     sinogram_noise_std = 0.0
-    AUTOENCODER = PatchAutoencoder(32,4,"patch_autoencoder_P32_D4.pth")
+    AUTOENCODER = PatchAutoencoder(40,5,"patch_autoencoder_P40_D5_also_synth.pth")
     AUTOENCODER = AUTOENCODER.eval()
     
     #perceptual_index = pyiqa.create_metric("topiq_nr", as_loss=True, device="cuda")
@@ -600,7 +590,7 @@ if __name__ == "__main__":
     #base_images = pt.stack(base_images, dim=0)
     #base_images = base_images.reshape(4,3,512,512)
     #print(f"Base images shape: {base_images.shape}")
-    regularization_ = lambda x : regularization(x,base_images=base_images)
+    regularization_ = lambda x : regularization(x)
     
     #angles = HTC_LEVEL_TO_ANGLES[htc_level]
     sinogram = None
@@ -668,7 +658,7 @@ if __name__ == "__main__":
                         edge_pad_size=edge_pad_size,
                         scale_sinogram=scale_sinogram
                         )
-        optimizer = optim.Adam(model.parameters(), lr=0.5)#, amsgrad=True)
+        optimizer = optim.Adam(model.parameters(), lr=0.4)#, amsgrad=True)
 
     #model = PredictSinogramAndReconstruct(128, np.deg2rad(angles), image_mask=outer_mask, device='cuda')
     #model = BackprojectAndUNet(sinogram.shape[1], np.deg2rad(angles), a=filter_sinogram_of_predicted_image_with_a, image_mask=image_mask, device='cuda')
@@ -786,6 +776,8 @@ if __name__ == "__main__":
         y_hat, s_hat = model(raw_sinogram)
         y_hat = y_hat.reshape(y.shape)
         s_hat = s_hat.reshape((len(angles), y.shape[1]))# / 255
+        
+        #y_hat = AUTOENCODER.remove_noise_from_img(y_hat, patch_size=40, stride=10, batch_size=128,patches_to_device="cpu", patches_to_dtype=pt.float32)
         
         # Scale s_hat to have the same mean and std as s
         if scale_shat_to_same_mean_and_std:
