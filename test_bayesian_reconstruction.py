@@ -123,7 +123,9 @@ def step(prior, measurement):
 circle = Circle(60)
 circle.make_holes(6, n_missing_pixels=0.4)
 A_true = circle.matrix
+
 angles = np.linspace(0, 180, 180)
+#angles = np.array([0, 90,180])
 
 # True
 fig, ax = plt.subplots(1, 2)
@@ -141,7 +143,8 @@ plt.show(block=False)
 
 prior = Circle(60).matrix - 0.2
 prior = np.clip(prior, 0, 1)
-#prior = np.random.rand(*A_true.shape)
+# Random values from 0.4 to 0.6
+prior = np.random.rand(*prior.shape) * 0.2 + 0.4
 fig, ax = plt.subplots(1, 2)
 for measurement, angle in tqdm(zip(measurements, angles)):
     rotated_prior = rotate(prior, angle, reshape=False, order = 5)

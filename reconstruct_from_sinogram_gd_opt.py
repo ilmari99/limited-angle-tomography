@@ -1,41 +1,31 @@
-
-from collections import OrderedDict
 import os
-
-import cv2
 from AbsorptionMatrices import Circle
-
-import pyiqa
 import torch as pt
-
-import kornia
 import torch.nn as nn
 import torch.optim as optim
 from torchvision.io import read_image, ImageReadMode
 import numpy as np
 import matplotlib.pyplot as plt
 from reconstruct import reconstruct_outer_shape
-from utils import filter_sinogram
-from utils import FBPRadon, FBPRadonFanbeam
+
+from utils import (filter_sinogram,
+                   FBPRadon,
+                   PatchAutoencoder,
+                   extract_patches_2d_pt,
+                   reconstruct_from_patches_2d_pt
+                   )
+
 from pytorch_msssim import ssim, ms_ssim
 import phantominator as ph
-from dictionary_learning import learn_dictionary, remove_noise_from_image_dl_pt, learn_dictionary_custom
 from regularization import (vector_similarity_regularization,
                             number_of_edges_regularization,
                             binary_regularization,
                             total_variation_regularization,
                             tikhonov_regularization,
-                            extract_patches_2d_pt,
-                            reconstruct_from_patches_2d_pt,
-                            PatchAutoencoder)
+                            )
 
-from pytorch_models import (SequenceToImageCNN,
-                            UNet,
-                            UNet2,
-                            SinogramCompletionTransformer,
-                            LSTMSinogram,
+from pytorch_models import (UNet,
                             HTCModel,
-                            FixedCNN,
                             SinogramToPatchesConnected)
 from torchsummary import summary
 import torchvision
@@ -65,7 +55,7 @@ class ReconstructorBase(nn.Module):
         self.image_mask = image_mask
         self.edge_pad_mask = self.get_edge_padding_mask(image_mask, pad_size=edge_pad_size)
         self.radon_t = FBPRadon(proj_dim, self.angles, a = a, clip_to_circle=False, device=device)
-        self._set_step_size_angle()
+        #self._set_step_size_angle()
         
     def get_edge_padding_mask(self, image_mask, pad_size=30):
         """ Returns a mask of size dim, dim.
@@ -134,41 +124,9 @@ class NoModel(ReconstructorBase):
         y_hat = y_hat.squeeze()
         s_hat = self.radon_t.forward(y_hat)
         return y_hat, s_hat
-    
-class SimpleDiffusionModelWrap(ReconstructorBase):
-    """ Similar to NoModel, in that y_hat is independent of the sinogram.
-    The y_hat is a distillation model taking in fixed random noise, passing through convolutions, and
-    outputting some y_hat.
-    """
-    def __init__(self, proj_dim, angles, a = 0.1, image_mask=None, device="cuda", edge_pad_size=5, scale_sinogram=True):
-        super(SimpleDiffusionModelWrap, self).__init__(proj_dim, angles, a = a, image_mask=image_mask, device=device, edge_pad_size=edge_pad_size)
-        self.input = pt.randn((1, 1,self.dim, self.dim), requires_grad=False, dtype=pt.float32)
-        self.nn = self.create_nn()
-        if scale_sinogram:
-            raise NotImplementedError("Scaling sinogram not implemented for NoModel")
         
-    def create_nn(self):
-        self.nn = UNet(1,1,32)
-        return self.nn
-
-    def forward(self, s):
-        y_hat = self.nn(self.input)
-        y_hat = pt.reshape(y_hat,(self.dim,self.dim))
-        #y_hat = pt.sigmoid(y_hat)
-        # Instead of sigmoid, clip to 0,1
-        #y_hat = pt.sigmoid(y_hat)
-        #y_hat = pt.clip(y_hat, 0, 1)
-        y_hat = self.image_mask * y_hat
-        # Set all pixels that are in the edge_pad to 1
-        y_hat = pt.where(self.edge_pad_mask == 1, pt.tensor(1.0, device='cuda'), y_hat)
-        y_hat = y_hat.squeeze()
-        s_hat = self.radon_t.forward(y_hat)
-        return y_hat, s_hat
-    
-    def parameters(self):
-        return self.nn.parameters()
         
-class ReconstructFromSinogram(ReconstructorBase):
+class HTCModelReconstructor(ReconstructorBase):
     """ This class is for models, that predict the image directly from the sinogram.
     """
     def __init__(self, proj_dim: int, angles, a = 0.1, image_mask=None, device="cuda", edge_pad_size=5):
@@ -249,7 +207,7 @@ class ReconstructFromSinogram(ReconstructorBase):
         
         return y_hat, s_hat
     
-class SinogramToPatchesConnectedWrap(ReconstructorBase):
+class SinogramToPatchesConnectedReconstructor(ReconstructorBase):
     def __init__(self,
                  proj_dim: int,
                  angles,
@@ -320,18 +278,10 @@ class BackprojectAndUNet(ReconstructorBase):
     
     def parameters(self):
         return self.nn.parameters()
-    
 
-        
-    
-    
-    
-def create_circle():
-    circle = Circle(63)
-    nholes = 10
-    hole_volatility = 0.4
-    n_missing_pixels = 0.05
-    hole_ratio_limit = 10
+
+def create_circle(radius=63, nholes=10, hole_volatility=0.4, n_missing_pixels=0.05, hole_ratio_limit=10):
+    circle = Circle(radius)
     # Create holes in different angles
     for i in range(nholes):
         at_angle = np.random.randint(0,90)
@@ -483,7 +433,7 @@ def find_good_a(s, sinogram, device='cuda',lims=(0,10), num_samples=200):
     return smallest_error_a
 
 class LPLoss(nn.Module):
-    def __init__(self, p=0.5):
+    def __init__(self, p=1.0):
         """ Loss that computes the Lp norm of the difference between two images.
         """
         super(LPLoss, self).__init__()
@@ -502,48 +452,20 @@ def scale_to_mean_and_std(X, mean, std):
     X_scaled = X_standardized * std + mean
     return X_scaled
 
-def shuffle_local_pixels(image, area=16, shuffle_chance=0.5):
-    """ Shuffle the pixels in a local area of the image
-    """
-    
-    shuffled_image = image.clone()
-    for i in range(0, image.shape[0], area):
-        for j in range(0, image.shape[1], area):
-            if pt.rand(1).item() < shuffle_chance:
-                min_i_idx = i
-                max_i_idx = min(i + area, image.shape[0])
-                min_j_idx = j
-                max_j_idx = min(j + area, image.shape[1])
-                
-                # Get the pixels
-                pixels = shuffled_image[min_i_idx:max_i_idx, min_j_idx:max_j_idx]
-                
-                # Shuffle the pixels
-                pixels = pixels.flatten()
-                indices = pt.randperm(pixels.numel())
-                pixels = pixels[indices]
-                pixels = pixels.reshape(max_i_idx-min_i_idx, max_j_idx-min_j_idx)
-                
-                shuffled_image[min_i_idx:max_i_idx, min_j_idx:max_j_idx] = pixels
-                
-    return shuffled_image
-
-
-
 HTC_LEVEL_TO_ANGLES = {
-    7 : np.linspace(0, 30, 60, endpoint=False),
-    6 : np.linspace(0, 40, 80, endpoint=False),
-    5 : np.linspace(0, 50, 100, endpoint=False),
-    4 : np.linspace(0, 60, 120, endpoint=False),
-    3 : np.linspace(0, 70, 140, endpoint=False),
-    2 : np.linspace(0, 80, 160, endpoint=False),
-    1 : np.linspace(0, 90, 180, endpoint=False)
+    7 : np.linspace(0, 30, 60, endpoint=True),
+    6 : np.linspace(0, 40, 80, endpoint=True),
+    5 : np.linspace(0, 50, 100, endpoint=True),
+    4 : np.linspace(0, 60, 120, endpoint=True),
+    3 : np.linspace(0, 70, 140, endpoint=True),
+    2 : np.linspace(0, 80, 160, endpoint=True),
+    1 : np.linspace(0, 90, 180, endpoint=True)
 }
 
 def regularization(y_hat):
     #return pt.tensor(0, dtype=pt.float32)
     tv = total_variation_regularization(y_hat,normalize=True)
-    #return tv
+    return tv
     reconstruction = AUTOENCODER.remove_noise_from_img(y_hat,
                                                  patch_size=40,
                                                  stride=5,
@@ -574,24 +496,13 @@ if __name__ == "__main__":
     edge_pad_size = 0
     use_no_model = False
     sinogram_noise_std = 0.0
+    
     AUTOENCODER = PatchAutoencoder(40,10,"patch_autoencoder_P40_D10_also_synth.pth")
     AUTOENCODER = AUTOENCODER.eval()
     
-    #perceptual_index = pyiqa.create_metric("topiq_nr", as_loss=True, device="cuda")
-    #print(perceptual_index.lower_better)
-    
-    #base_images = load_base_images("Circles128x128_1000", to_tensor=True, to_3d=True)
-    base_images = load_htc_images("HTC_files")
-    base_images = [pt.tensor(img, dtype=pt.float32, device="cpu")/255 for img in base_images]
-    #base_images = [img.unsqueeze(-1) for img in base_images]
-    #base_images = [pt.cat([img, img, img], dim=-1) for img in base_images]
-    #print(base_images[0].shape)
-    #base_images = pt.stack(base_images, dim=0)
-    #base_images = base_images.reshape(4,3,512,512)
-    #print(f"Base images shape: {base_images.shape}")
+    # Wrap if we need arguments
     regularization_ = lambda x : regularization(x)
     
-    #angles = HTC_LEVEL_TO_ANGLES[htc_level]
     sinogram = None
     #y, image_mask = get_basic_circle_scan(angles=angles)
     #y, image_mask = get_shepp_logan_scan(angles, image_dim=64)
@@ -600,18 +511,20 @@ if __name__ == "__main__":
     #image_mask = None
     #sinogram = None
     
+    # If we set the sinogram to None, we compute the sinogram using FBPRadon, either noiseless or noisy.
     if sinogram is None:
         print(f"Sinogram is None, measuring sinogram")
-        radon_t_no_filter = FBPRadon(y.shape[1], np.deg2rad(angles), a=0, device='cuda')
+        radon_t_no_filter = FBPRadon(y.shape[1], np.deg2rad(angles), a=0)
         sinogram = radon_t_no_filter.forward(y)
         # Add noise
         mean = pt.mean(sinogram)
         std = pt.std(sinogram)
-        noise = pt.normal(0.0, sinogram_noise_std, size=sinogram.shape, device='cuda')
+        noise = pt.normal(0.0, sinogram_noise_std, size=sinogram.shape)
         sinogram = sinogram + noise
-        
+    
+    # If we set the image_mask to None, we use a mask full of ones
     if image_mask is None:
-        image_mask = pt.ones(y.shape, device='cuda', requires_grad=False)
+        image_mask = pt.ones(y.shape, requires_grad=False)
 
     print(f"Shapes of data:\ny: {y.shape}, sinogram: {sinogram.shape}, image_mask: {image_mask.shape}, angles: {angles.shape}")
 
@@ -640,26 +553,21 @@ if __name__ == "__main__":
         print(f"Padded y and mask from {y_not_padded.shape} to {y.shape}")
     
     if use_no_model:
-        model = NoModel(sinogram.shape[1],
-                        np.deg2rad(angles),
+        model = NoModel(proj_dim = sinogram.shape[1],
+                        angles = np.deg2rad(angles),
                         a=filter_sinogram_of_predicted_image_with_a,
                         image_mask=image_mask,
-                        device='cuda',
                         edge_pad_size=edge_pad_size,
-                        scale_sinogram=scale_sinogram
                         )
-        optimizer = optim.Adam(model.parameters(), lr=0.4)
+        optimizer = optim.Adam(model.parameters(), lr=0.3, amsgrad=True)
     else:
-        model = SinogramToPatchesConnectedWrap(sinogram.shape[1],
-                                        np.deg2rad(angles),
-                                        patch_size=6,
-                                        stride=-1,
+        model = HTCModelReconstructor(proj_dim = sinogram.shape[1],
+                                        angles= np.deg2rad(angles),
                                         a=filter_sinogram_of_predicted_image_with_a,
                                         image_mask=image_mask,
-                                        device='cuda',
                                         edge_pad_size=edge_pad_size,
                                     )
-        optimizer = optim.Adam(model.parameters(), lr=0.001, amsgrad=False)
+        optimizer = optim.Adam(model.parameters(), lr=0.001, amsgrad=True)
 
     #model = PredictSinogramAndReconstruct(128, np.deg2rad(angles), image_mask=outer_mask, device='cuda')
     #model = BackprojectAndUNet(sinogram.shape[1], np.deg2rad(angles), a=filter_sinogram_of_predicted_image_with_a, image_mask=image_mask, device='cuda')

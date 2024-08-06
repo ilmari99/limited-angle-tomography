@@ -1,25 +1,17 @@
-import os
 import numpy as np
-import random
 import matplotlib.pyplot as plt
 import cv2
 import skimage
 from AbsorptionMatrices import Square, AbsorptionMatrix, Full, FilledBezierCurve, Circle
-from visualize import plot_measurements
-from utils import remove_noise_from_measurements, reconstruct_error
-from reconstruct import (backproject_to_shape,
-                         backproject_to_large_square,
+from utils import reconstruct_error
+from reconstruct import (
                          backproject_with_distance_measures,
                          calc_mask_from_distances,
-                         calc_masks_from_distances,
-                         filter_sinogram)
-from sklearn.preprocessing import StandardScaler, MinMaxScaler
-# Skimage
-from skimage import filters
+                         calc_masks_from_distances
+                         )
 # Canny
 from skimage import feature
-from scipy.ndimage import binary_fill_holes
-from skimage.segmentation import flood, flood_fill
+from skimage.segmentation import flood_fill
 
 """
 This is a short script I started doing to attempt to model where are holes
