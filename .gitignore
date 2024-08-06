@@ -10,6 +10,9 @@ limited-angle-tomography/*
 BenchmarkReconstruction*/
 .vscode/
 Circles128x128_1000/
+torch-radon/
+to_gif/
+.datagenvenv/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
