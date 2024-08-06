@@ -266,6 +266,8 @@ def training_loop(autoenc,
             loss = criterion(decoded, batch)
             loss.backward()
             optimizer.step()
+            if i % 100 == 0:
+                print(f"Epoch {epoch}, Batch {i}, Loss: {loss}", end="\r")
         # Test the model
         with torch.no_grad():
             for i in range(0, len(test_filtered_patches), batch_size):
@@ -274,7 +276,7 @@ def training_loop(autoenc,
                 decoded = autoenc(batch)
                 decoded = decoded.squeeze(1)
                 test_loss = criterion(decoded, batch)
-            print(f"Epoch {epoch}, Loss: {test_loss}")
+            print(f"Epoch {epoch}, Test loss: {test_loss}")
             if test_loss < best_loss:
                 best_loss = test_loss
                 best_epoch = epoch
@@ -292,16 +294,16 @@ def training_loop(autoenc,
 
 if __name__ == "__main__":
     patch_size = 40
-    num_latent = 5
+    num_latent = 10
     num_epochs = 25
     patience = 5
     restore_best = True
     learning_rate = 0.001
     batch_size = 64
     train_test_split = 0.7
-    load_pre_trained = "patch_autoencoder_P40_D5_also_synth.pth"
+    load_pre_trained = "patch_autoencoder_P40_D10_also_synth.pth"
     do_training = False
-    stride = 4
+    stride = 10
     
     torch.manual_seed(0)
     
@@ -389,7 +391,7 @@ if __name__ == "__main__":
         img = get_htc_scan(7, "a")
         img_distorted = img
         img_distorted = shuffle_local_pixels(img, area=patch_size // 2, shuffle_chance=0.4)
-        img_distorted = random_distort(img_distorted, factor=0.1)
+        img_distorted = random_distort(img_distorted, factor=0.2)
         
         img = torch.tensor(img, dtype=torch.float32)
         img_distorted = torch.tensor(img_distorted, dtype=torch.float32)
@@ -397,12 +399,13 @@ if __name__ == "__main__":
         
         reconstructed = autoenc.remove_noise_from_img(img,
                                                       patch_size,
-                                                      stride,
-                                                      batch_size,
+                                                      stride = stride,
+                                                      batch_size=batch_size,
                                                       patches_to_device="cpu",
                                                       patches_to_dtype=torch.bool
                                                       )
-
+        
+        
 
         fig, ax = plt.subplots(1, 3)
         ax[0].matshow(img.cpu().numpy())

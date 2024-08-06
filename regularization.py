@@ -1,4 +1,5 @@
 import os
+import warnings
 import numpy as np
 import torch
 from pytorch_msssim import ssim
@@ -79,15 +80,17 @@ class PatchAutoencoder(torch.nn.Module):
                 batch = batch.to("cuda")
             if patches_to_dtype != torch.float32:
                 batch = batch.to(torch.float32)
-            dec = self(batch)
+            dec = self(batch).detach()
+            dec = dec.to(patches_to_device)
+            dec = dec.to(patches_to_dtype)
             dec_patches.append(dec)
         dec_patches = torch.cat(dec_patches, dim=0)
         dec_patches = dec_patches.squeeze(1)
         # Reconstruct the image
-        reconstructed = reconstruct_from_patches_2d_pt(dec_patches, img.shape, stride=stride)
+        reconstructed = reconstruct_from_patches_2d_pt(dec_patches, img.shape, stride=stride, device=patches_to_device)
         return reconstructed
 
-def extract_patches_2d_pt(image, patch_size=8,device=None, dtype=None, stride=1):
+def extract_patches_2d_pt(image, patch_size=8, device=None, dtype=None, stride=1):
     """ A Pytorch implementation of extract_patches_2d.
     It takes in an image (WxH) and returns all the (patch_sz x patch_sz) patches with stride=1.
     """
@@ -104,23 +107,28 @@ def reconstruct_from_patches_2d_pt(patches, image_size, device=None, stride=1):
     """
     patch_size = patches.shape[-1]
     
-    #print(f"Patches shape: {patches.shape}")
+    #print(f"Patches shape: {patches.shape}", flush=True)
     patches = patches.reshape(-1, patch_size*patch_size)
     patches = patches.unsqueeze(0).permute(0, 2, 1)
-    #print(f"Patches shape: {patches.shape}")
+    #print(f"Patches shape: {patches.shape}", flush=True)
     counter_image = torch.ones_like(patches, device=device)
     #counter_image = torch.nn.functional.unfold(counter_image.unsqueeze(0).unsqueeze(0), patch_size, stride=1)
-    #print(f"Counter image shape: {counter_image.shape}")
+    #print(f"Counter image shape: {counter_image.shape}", flush=True)
     # Fold patches of ones to know how many patches overlap each pixel
     counter_image = torch.nn.functional.fold(counter_image, image_size, patch_size, stride=stride)
     counter_image = counter_image.squeeze()
+    # HOW ON EARTH CAN THE COUNTER IMAGE BE 0??
+    if torch.any(counter_image == torch.tensor(0, device=device)):
+        warnings.warn("Counter image is 0")
+        counter_image = counter_image + 1e-6
+    #print(counter_image, flush=True)
     #print(f"Counter image shape: {counter_image.shape}")
     # fold the patches
     image = torch.nn.functional.fold(patches, image_size, patch_size, stride=stride)
     image = image.squeeze()
+    image = image.to(device)
     # Divide the image by the counter image
     image = image / counter_image
-    image = image.to(device)
     return image
 
 def total_variation_regularization(mat, normalize=True, order=1):

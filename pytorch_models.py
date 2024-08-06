@@ -9,8 +9,174 @@ from collections import OrderedDict
 import numpy as np
 from torch_radon import Radon
 from utils import FBPRadon
-from transformers import TimeSeriesTransformerModel, TimeSeriesTransformerForPrediction, TimeSeriesTransformerConfig
+from regularization import extract_patches_2d_pt, reconstruct_from_patches_2d_pt
 
+
+
+
+class FixedCNN(nn.Module):
+    """ This model takes in an image with just random noise,
+    passes the noise through a series of convolutional layers,
+    and outputs a final image of the desired shape.   
+    """
+    def __init__(self, output_shape, num_layers=3):
+        super(FixedCNN, self).__init__()
+        self.output_shape = (output_shape, output_shape)
+        self.num_layers = num_layers
+        self.conv_layers = self.create_conv_layers()
+        self.conv_layers = self.conv_layers.train()
+    
+    def parameters(self, recurse: bool = True):
+        return self.conv_layers.parameters(recurse)
+        
+    def create_conv_layers(self):
+        """ Create a series of convolutional layers
+        """
+        layers = []
+        self.init_features = 64
+        for i in range(self.num_layers):
+            in_channels = 1 if i == 0 else self.init_features
+            out_channels = self.init_features
+            layers.append(nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=1, padding=1))
+            layers.append(nn.ReLU())
+        # The output is a single channel image
+        layers.append(nn.Conv2d(self.init_features, 1, kernel_size=3, stride=1, padding=1))
+        return nn.Sequential(*layers)
+    
+    def forward(self, x):
+        out = self.conv_layers(x)
+        return out
+    
+    
+class SinogramToPatchesConnected(torch.nn.Module):
+    def __init__(self, image_size, patch_size, stride, angles, a=0):
+        """ A model that uses a connected architecture to predict
+        an image from a sinogram.
+        The model is only locally connected, so that only the relevant
+        part of the sinogram is used to predict the patch at a certain location.
+        Args:   
+            image_size: The size of the image
+            patch_size: The size of a patch, i.e. the local receptive field
+            stride: The stride of the patches. Overlapping patches are averaged.
+            angles: The angles (rad) used in the Radon transform
+        """
+        super(SinogramToPatchesConnected, self).__init__()
+        self.image_size = image_size
+        self.patch_size = patch_size
+        self.stride = stride
+        self.angles = angles
+        #print(f"Image size: {image_size}, Patch size: {patch_size}, Stride: {stride}")
+        
+        self.radont = FBPRadon(image_size, angles, a=a)
+        
+        # Get the base_matrices and the corresponding sinograms
+        patch_start_pixels = self.get_patch_starts(image_size, patch_size, stride=stride)
+        #print(f"Number of patch_starts: {len(patch_start_pixels)}")
+        
+        #num_patches = extract_patches_2d_pt(torch.zeros((image_size, image_size), device='cuda'), patch_size, stride=stride)
+        #print(f"Number of patches: {num_patches.shape}", flush=True)
+        
+        # Calculate which patches are actually inside the circle List[bool]
+        patch_is_inside_circle = []
+        for start in patch_start_pixels:
+            i, j = start
+            dist_from_center_to_start = np.sqrt((i - image_size // 2) ** 2 + (j - image_size // 2) ** 2)
+            dist_from_center_to_end = np.sqrt((i + patch_size - image_size // 2) ** 2 + (j + patch_size - image_size // 2) ** 2)
+            if dist_from_center_to_start <= image_size // 2 and dist_from_center_to_end <= image_size // 2:
+                patch_is_inside_circle.append(True)
+            else:
+                patch_is_inside_circle.append(False)
+        print(f"Num inside circle: {sum(patch_is_inside_circle)}, Num outside circle: {len(patch_is_inside_circle) - sum(patch_is_inside_circle)}")
+        # Find every img x img mask, where only the patch is 1
+        patch_masks = []
+        for patch_idx, start in enumerate(patch_start_pixels):
+            i, j = start
+            mask = np.zeros((image_size, image_size))
+            if patch_is_inside_circle[patch_idx]:
+                mask[i:i+patch_size, j:j+patch_size] = 1
+            patch_masks.append(mask)
+        
+        patch_masks = np.array(patch_masks)
+        base_sinograms = self.get_base_sinograms(patch_masks, angles)
+        #self.base_sinograms.to("cpu")
+        #self.patch_masks = torch.tensor(self.patch_masks, dtype=torch.float32, device='cpu')
+        # TODO: The values at base_sinograms could actually be used as sort of attention weights
+        
+        # The sinogram masks are the sinograms, but every != 0 value is set to 1
+        masks = []
+        for sinogram in base_sinograms:
+            mask = torch.where(sinogram > 1e-6, 1, 0)
+            masks.append(mask)
+        avg_num_of_ones_in_mask = sum([torch.sum(mask).item() for mask in masks]) / len(masks)
+        print(f"Avg num of ones in mask: {avg_num_of_ones_in_mask}")
+        self.sinogram_masks = torch.stack(masks).to("cpu").to(torch.float16)
+        print(f"Masks: {self.sinogram_masks.shape}")
+        
+        # We use a single model to predict each patch, based on it's masked sinogram
+        self.model = torch.nn.Sequential(
+            torch.nn.Conv2d(1, 16, kernel_size=3, stride=1, padding=1),
+            torch.nn.ReLU(),
+            torch.nn.Conv2d(16, 32, kernel_size=3, stride=1, padding=1),
+            torch.nn.ReLU(),
+            torch.nn.Conv2d(32, 1, kernel_size=3, stride=1, padding=1),
+            torch.nn.Flatten(),
+            torch.nn.Linear(len(self.angles) * self.image_size, self.patch_size * self.patch_size),
+        )
+        self.model.to('cuda')
+    
+    def forward(self, sinogram):
+        # Get the masked sinograms
+        sinogram = sinogram.to('cpu').to(torch.float16)
+        # Elementwise multiplication
+        masked_sinograms = sinogram * self.sinogram_masks
+        #print(f"Masked sinograms shape: {masked_sinograms.shape}")
+        # As input, give a masked sinogram, and predict a patch_size x patch_size patch
+        # npatches x 1 x num_angles x image_size
+        masked_sinograms = masked_sinograms.unsqueeze(1)
+        patches = []
+        # Do in batchs of 64
+        batch_size = 32
+        for i in range(0, masked_sinograms.shape[0], batch_size):
+            n = batch_size if i + batch_size < masked_sinograms.shape[0] else masked_sinograms.shape[0] - i
+            batch = masked_sinograms[i:i+n]
+            batch = batch.to('cuda').float()
+            patch_batch = self.model(batch)
+            patch_batch = torch.reshape(patch_batch, (n, self.patch_size, self.patch_size))
+            patches.append(patch_batch.cpu().to(torch.float16))
+        patches = torch.cat(patches)
+        patches = patches.squeeze()
+        #print(f"Patches shape: {patches.shape}")
+        #patches = patches.squeeze()
+        # Reconstruction from patches
+        y_hat = reconstruct_from_patches_2d_pt(patches, (self.image_size, self.image_size), stride=self.stride, device='cpu')
+        y_hat = y_hat.to('cuda').float()
+        y_hat = torch.sigmoid(y_hat)
+        return y_hat
+    
+    @staticmethod
+    def get_patch_starts(image_size, patch_size, stride=1):
+        """ Return the starting pixel of each patch.
+        """
+        patch_starts = []
+        for i in range(0, image_size, stride):
+            for j in range(0, image_size, stride):
+                if i + patch_size > image_size or j + patch_size > image_size:
+                    continue
+                patch_starts.append((i, j))
+        return patch_starts
+    
+    @staticmethod
+    def get_base_sinograms(base_matrices, angles, a=0) -> list:
+        """ Get the sinograms of the base matrices.
+        """
+        rt = FBPRadon(base_matrices.shape[1], angles, a)
+        base_sinograms = []
+        for mat in base_matrices:
+            mat = torch.tensor(mat, dtype=torch.float32, device='cuda')
+            sinogram = rt.forward(mat)
+            sinogram = sinogram.cpu()
+            base_sinograms.append(sinogram)
+        return base_sinograms
 
 class Block(nn.Module):
     def __init__(self, dim, kernel_size=5, expansion=2):
