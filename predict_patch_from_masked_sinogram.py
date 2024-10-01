@@ -3,7 +3,8 @@ import numpy as np
 from AbsorptionMatrices import Circle
 from utils import FBPRadon
 import math
-from regularization import extract_patches_2d_pt, reconstruct_from_patches_2d_pt
+from utils import extract_patches_2d_pt, reconstruct_from_patches_2d_pt
+from pytorch_models import EncoderDecoder
 import sympy
 import matplotlib.pyplot as plt
 

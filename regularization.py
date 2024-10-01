@@ -4,7 +4,26 @@ from pytorch_msssim import ssim
 # Import mobilenet_v2
 from torchvision.models import mobilenet_v3_small
 from kornia.filters import spatial_gradient
+from learn_patch_autoencoder import PatchAutoencoder
 
+def create_autoencoder_regularization(autoencoder_path, patch_size, num_latent, stride, batch_size):
+    """ Return a callable that can be used to regularize the latent representation of an image.
+    """
+    autoencoder = PatchAutoencoder(patch_size, num_latent, autoencoder_path)
+    autoencoder.to('cuda').eval()
+    def regularization(y_hat):
+        # Remove noise from the image
+        reconstruction = autoencoder.remove_noise_from_img(y_hat,
+                                                 patch_size=patch_size,
+                                                 stride=stride,
+                                                 batch_size=batch_size,
+                                                 patches_to_device='cpu',
+                                                 patches_to_dtype=torch.float16
+        )
+        reconstruction = reconstruction.to(y_hat.device)
+        diff = torch.mean(torch.abs(y_hat - reconstruction))
+        return diff
+    return regularization
 
 def total_variation_regularization(mat, normalize=True, order=1):
     """ Calculate the total variation of an image
@@ -107,16 +126,19 @@ def ssim_regularization(y_hat, base_images, coeff=0.01):
     ssim_loss = 1 - ssim(y_hat_replicated, base_images, data_range=1, size_average=False)#, nonnegative_ssim=True, win_size=15, win_sigma=7.5)
     return torch.mean(ssim_loss) * coeff
 
-def binary_regularization(y_hat, coeff=0.01):
-    """ Penalize images based on the number of pixels that are not 0.05 < x < 0.95 """
-    y_hat = y_hat.reshape((128,128))
-    n_pixels = 128*128
-    # Get a mask
-    gt_zero = y_hat > 0.05
-    lt_one = y_hat < 0.95
-    non_binary_pixels = torch.logical_and(gt_zero, lt_one)
-    n_non_binary_pixels = torch.sum(non_binary_pixels)
-    return n_non_binary_pixels / n_pixels
+def binary_regularization(y_hat, norm=1):
+    """ Penalize y_hat based on how different it is from it's binary version
+    """
+    assert norm in [1, 2], "Only L1 and L2 norms are supported"
+    y_hat_bin = y_hat > 0.5
+    # Cast to float32
+    y_hat_bin = y_hat_bin.float()
+    diff = y_hat - y_hat_bin
+    if norm == 1:
+        return torch.mean(torch.abs(diff))
+    return torch.mean(diff**2)
+    
+    
 
 def histogram_regularization(y_hat, true_y):
     """ Penalize based on how different the histogram of y_hat is from the histogram of true_y

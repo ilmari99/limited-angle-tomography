@@ -98,16 +98,6 @@ class PatchAutoencoder(torch.nn.Module):
         )
         return encoder, decoder
     
-    def remove_noise_from_img_differentiable(self, img, patch_size,stride=-1):
-        """ Remove noise from an image using the autoencoder.
-        """
-        if stride == -1:
-            stride = patch_size
-        patches = extract_patches_2d_pt(img, patch_size, stride=stride)
-        enc_dec = self(patches)
-        reconstructed = reconstruct_from_patches_2d_pt(enc_dec, img.shape, stride=stride)
-        return reconstructed
-    
     def remove_noise_from_img(self, img, patch_size, stride, batch_size, patches_to_device='cuda', patches_to_dtype=torch.float32):
         """ Remove noise from an image using the autoencoder.
         """

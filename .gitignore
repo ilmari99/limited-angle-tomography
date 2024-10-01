@@ -13,6 +13,7 @@ Circles128x128_1000/
 torch-radon/
 to_gif/
 .datagenvenv/
+Benchmark*/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

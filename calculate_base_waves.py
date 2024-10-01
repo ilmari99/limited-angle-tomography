@@ -3,7 +3,7 @@ import matplotlib.pyplot as plt
 import torch
 from AbsorptionMatrices import Circle
 from utils import FBPRadon, filter_sinogram
-from regularization import reconstruct_from_patches_2d_pt, extract_patches_2d_pt
+from utils import reconstruct_from_patches_2d_pt, extract_patches_2d_pt
 
 def get_possible_pixels(image_size, patch_size=1, stride=1, skip_outside_circle=True):
     """ Return a list of pixels, where the pixel denotes where a patch of size 'patch_size' can be placed,
