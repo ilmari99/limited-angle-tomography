@@ -1,17 +1,15 @@
 import os
 import random
+import sys
 import torch
 import numpy as np
-from sklearn.decomposition import MiniBatchDictionaryLearning, DictionaryLearning
-from torchvision.transforms.functional import adjust_sharpness
 from torchvision.io import read_image, ImageReadMode
 from PIL import Image
+import argparse
 
 # TESTING
 from AbsorptionMatrices import Circle
-from sklearn.feature_extraction.image import extract_patches_2d
 import torch
-from torch.utils.data import Dataset, DataLoader
 import matplotlib.pyplot as plt
 
 def extract_patches_2d_pt(image, patch_size=8,device=None, dtype=None, stride=1):
@@ -47,8 +45,29 @@ def reconstruct_from_patches_2d_pt(patches, image_size, device=None, stride=1):
     image = image.squeeze()
     # Divide the image by the counter image
     image = image / counter_image
+    # nans to zeros
+    image = torch.nan_to_num(image)
     image = image.to(device)
     return image
+
+class ResidualBlock(torch.nn.Module):
+    def __init__(self, in_channels, out_channels):
+        super(ResidualBlock, self).__init__()
+        self.block = torch.nn.Sequential(
+            torch.nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=1, padding=1),
+            torch.nn.BatchNorm2d(out_channels),
+            torch.nn.ReLU(),
+            torch.nn.Conv2d(out_channels, out_channels, kernel_size=3, stride=1, padding=1),
+            torch.nn.BatchNorm2d(out_channels)
+        )
+        self.shortcut = (
+            torch.nn.Conv2d(in_channels, out_channels, kernel_size=1)
+            if in_channels != out_channels
+            else torch.nn.Identity()
+        )
+
+    def forward(self, x):
+        return torch.nn.ReLU()(self.block(x) + self.shortcut(x))
 
 class PatchAutoencoder(torch.nn.Module):
     def __init__(self, patch_size = 16, num_latent = 8, pretrained_weights=None):
@@ -60,6 +79,11 @@ class PatchAutoencoder(torch.nn.Module):
     def encode(self, x):
         x = self.encoder(x)
         return x
+    
+    def eval(self):
+        self.encoder.eval()
+        self.decoder.eval()
+        return self
         
     def forward(self, x):
         # Expand
@@ -106,19 +130,52 @@ class PatchAutoencoder(torch.nn.Module):
         batch_size = batch_size if batch_size > 0 else len(patches)
         dec_patches = []
         # Encode in batches
-        for i in range(0, len(patches), batch_size):
-            batch = patches[i:i+batch_size]
-            if patches_to_device != "cuda":
-                batch = batch.to("cuda")
-            if patches_to_dtype != torch.float32:
-                batch = batch.to(torch.float32)
-            dec = self(batch)
-            dec_patches.append(dec)
+        with torch.no_grad():
+            for i in range(0, len(patches), batch_size):
+                batch = patches[i:i+batch_size]
+                #print(f"Batch shape: {batch.shape}")
+                if patches_to_device != "cuda":
+                    batch = batch.to("cuda")
+                #if patches_to_dtype != torch.float32:
+                #    batch = batch.to(torch.float32)
+                dec = self(batch)
+                dec_patches.append(dec.cpu())
+        #print(f"Computed {len(dec_patches)} batches")
         dec_patches = torch.cat(dec_patches, dim=0)
         dec_patches = dec_patches.squeeze(1)
         # Reconstruct the image
         reconstructed = reconstruct_from_patches_2d_pt(dec_patches, img.shape, stride=stride)
         return reconstructed
+    
+class AdvancedPatchAutoencoder(PatchAutoencoder):
+    
+    def get_advanced_autoencoder(patch_size=16, num_latent=8):
+        """
+        Create an improved autoencoder model with a more advanced architecture for representing different types of patches.
+        """
+
+        encoder = torch.nn.Sequential(
+            ResidualBlock(1, 32),  # Input: (1, patch_size, patch_size)
+            torch.nn.MaxPool2d(kernel_size=2, stride=2),  # Downsample
+            ResidualBlock(32, 64),
+            torch.nn.MaxPool2d(kernel_size=2, stride=2),  # Downsample
+            ResidualBlock(64, 128),
+            torch.nn.AdaptiveAvgPool2d(1),  # Aggregate spatial dimensions
+            torch.nn.Flatten(),
+            torch.nn.Linear(128, num_latent),  # Latent representation
+        )
+
+        decoder = torch.nn.Sequential(
+            torch.nn.Linear(num_latent, 128),  # Decode latent representation
+            torch.nn.Unflatten(1, (128, 1, 1)),  # Reshape to feature map
+            torch.nn.ConvTranspose2d(128, 64, kernel_size=3, stride=2, padding=1, output_padding=1),
+            ResidualBlock(64, 64),
+            torch.nn.ConvTranspose2d(64, 32, kernel_size=3, stride=2, padding=1, output_padding=1),
+            ResidualBlock(32, 32),
+            torch.nn.Conv2d(32, 1, kernel_size=3, stride=1, padding=1),
+            torch.nn.Sigmoid(),  # Output pixel values between 0 and 1
+        )
+        return encoder, decoder
 
 #TESTING
 def create_circle():
@@ -230,7 +287,9 @@ def training_loop(autoenc,
                   patience=10,
                   learning_rate=0.001,
                   batch_size=64,
-                  restore_best=True):
+                  restore_best=True,
+                  save_to="patch_autoencoder.pth",
+                  overwrite=False):
     # Train the autoencoder
     optimizer = torch.optim.Adam(autoenc.parameters(), lr=learning_rate)
     criterion = torch.nn.BCELoss()
@@ -277,23 +336,36 @@ def training_loop(autoenc,
     if restore_best:
         autoenc.load_state_dict(best_weights)
     # Save the model
-    torch.save(autoenc.state_dict(), "patch_autoencoder.pth")
-    
+    if overwrite or not os.path.exists(save_to):
+        torch.save(autoenc.state_dict(), save_to)
+    elif not overwrite:
+        print(f"Model file {save_to} already exists, not overwriting")
     return autoenc
 
 
 if __name__ == "__main__":
-    patch_size = 40
-    num_latent = 10
-    num_epochs = 25
+    patch_size = 32
+    num_epochs = 50
     patience = 5
     restore_best = True
     learning_rate = 0.001
     batch_size = 64
-    train_test_split = 0.7
-    load_pre_trained = "patch_autoencoder_P40_D10_also_synth.pth"
-    do_training = False
-    stride = 10
+    train_test_split = 0.85
+    load_pre_trained = ""#patch_autoencoder_P40_D10.pth"
+    do_training = True
+    overwrite = True
+    test_stride = 1
+    from_command_line = True if len(sys.argv) > 1 else False
+    do_demo = True if not from_command_line else False
+    
+    parser = argparse.ArgumentParser(description='Patch Autoencoder')
+    parser.add_argument('--patch_size', type=int, default=32, help='Size of the patches')
+    args = parser.parse_args()
+    patch_size = args.patch_size
+    num_latent = patch_size // 4
+    train_stride = patch_size // 4
+    
+    save_to = f"patch_autoencoder_P{patch_size}_D{num_latent}.pth"
     
     torch.manual_seed(0)
     
@@ -307,7 +379,7 @@ if __name__ == "__main__":
     
     # Load images as numpy arrays, and use sklearn to learn the dictionary.
     #images = [get_basic_circle_image() for _ in range(10)]
-    images = load_generated_images("generated_data")    
+    images = load_generated_images("generated_data8")    
     if images[0].device.type == 'cuda':
         images = [img.cpu().numpy() for img in images]
     if not do_training:
@@ -316,7 +388,7 @@ if __name__ == "__main__":
     images = np.array(images)
     
     images = [torch.tensor(img, dtype=torch.float32) for img in images]
-    image_patches = [extract_patches_2d_pt(img, patch_size,"cuda",dtype=torch.bool,stride=stride) for img in images]
+    image_patches = [extract_patches_2d_pt(img, patch_size,"cuda",dtype=torch.bool,stride=train_stride) for img in images]
     
     # Concatenate the patches
     all_patches = torch.cat(image_patches, dim=0)
@@ -354,28 +426,49 @@ if __name__ == "__main__":
                                 patience=patience,
                                 learning_rate=learning_rate,
                                 batch_size=batch_size,
-                                restore_best=restore_best)
+                                restore_best=restore_best,
+                                save_to=save_to,
+                                overwrite=overwrite)
     
+    if not do_demo:
+        print(f"Training done, saved model to {save_to}")
+        sys.exit(0)
     
     # Show 4 enc-dec examples
     fig, ax = plt.subplots(2, 4)
-    fig.suptitle("Encoded and decoded patches")
+    # Make a big suptitle
+    fig.suptitle(f"Patch autoencoder with patch size {patch_size} and {num_latent} latent variables",
+                    fontsize=16)
     with torch.no_grad():
         for i in range(4):
             idx = np.random.randint(0, len(test_filtered_patches))
             original = test_filtered_patches[idx].clone().squeeze().cpu().numpy()
             original = original.astype(np.float32)
-            original_distorted = shuffle_local_pixels(original, area=patch_size // 4, shuffle_chance=0.3)
-            original_distorted = random_distort(original_distorted)
-            ax[0,i].matshow(original)
+            while np.sum(original) < 0.1 * patch_size * patch_size or np.sum(original) > 0.8 * patch_size * patch_size:
+                idx = np.random.randint(0, len(test_filtered_patches))
+                original = test_filtered_patches[idx].clone().squeeze().cpu().numpy()
+                original = original.astype(np.float32)
+            original_distorted = original.copy()
+            if i >= 2:
+                # Distort the patch
+                original_distorted = shuffle_local_pixels(original_distorted, area=patch_size//8, shuffle_chance=0.4)
+                original_distorted = random_distort(original_distorted, factor=0.4)
+            ax[0,i].matshow(original_distorted)
+            ax[0,i].set_title("Input patch" if i < 2 else "Input patch\nwith artifacts")
+            
+            
             
             enc = autoenc.encode(torch.tensor(original_distorted).unsqueeze(0).unsqueeze(0))
-            print(f"Encoded: {enc}")
             dec = autoenc.decoder(enc)
             
             ax[1,i].matshow(dec.squeeze().cpu().numpy())
             latent = enc.squeeze().cpu().numpy()
-            ax[1,i].set_title("Latent representation: " + str(latent))
+            mae = np.mean(np.abs(original - dec.squeeze().cpu().numpy()))
+            ax[1,i].set_title(f"Encoded-Decoded\nMAE: {mae:.2f}")
+            
+            for a in ax[:,i]:
+                a.set_xticks([])
+                a.set_yticks([])
             
         # Load an image
         img = get_htc_scan(7, "a")
@@ -387,23 +480,37 @@ if __name__ == "__main__":
         img_distorted = torch.tensor(img_distorted, dtype=torch.float32)
         print(f"Distorted image shape: {img_distorted.shape}")
         
-        reconstructed = autoenc.remove_noise_from_img(img,
+        reconstructed = autoenc.remove_noise_from_img(img_distorted,
                                                       patch_size,
-                                                      stride = stride,
+                                                      stride = test_stride,
                                                       batch_size=batch_size,
-                                                      patches_to_device="cpu",
-                                                      patches_to_dtype=torch.bool
                                                       )
         
+        img_cpu_np = img.cpu().numpy()
+        img_distorted_cpu_np = img_distorted.cpu().numpy()
+        reconstructed_cpu_np = reconstructed.cpu().numpy()
+        # The reconstructed image might have nans, replace them with zeros
+        reconstructed_cpu_np = np.nan_to_num(reconstructed_cpu_np)
         
+        mae = np.mean(np.abs(reconstructed_cpu_np - img_cpu_np))
+        print(f"MAE: {mae}")
 
         fig, ax = plt.subplots(1, 3)
-        ax[0].matshow(img.cpu().numpy())
+        fig.suptitle(f"Removing artifacts using a {patch_size}x{patch_size}\npatch autoencoder with {num_latent} latent variables",
+                    fontsize=16)
+        ax[0].matshow(img_cpu_np)
         ax[0].set_title("Original image")
-        ax[1].matshow(img_distorted.cpu().numpy())
+        ax[1].matshow(img_distorted_cpu_np)
         ax[1].set_title("Distorted image")
-        ax[2].matshow(reconstructed.cpu().numpy())
+        ax[2].matshow(reconstructed_cpu_np)
         ax[2].set_title("Reconstructed image")
+        # Remove ticks
+        for a in ax:
+            a.set_xticks([])
+            a.set_yticks([])
+        # Show mae of reconstruction
+        ax[2].set_title(f"Reconstructed image\nMAE: {mae:.2f}")
+    
     
     plt.show()
     

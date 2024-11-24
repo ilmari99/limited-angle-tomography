@@ -27,10 +27,17 @@ def hash_randrange(seeds, start, stop=None):
     if stop is None:
         stop = start
         start = 0
-    return start + hash128(seeds) % (stop - start)
+    try:
+        return start + hash128(seeds) % (stop - start)
+    except:
+        # This happens if the user isn't in the correct directory
+        raise ValueError("You must run this script in the correct directory")
 
 def hash_rand(seeds, a, b):
-    return a + (b - a) * hash128(seeds) / 2**128
+    try:
+        return a + (b - a) * hash128(seeds) / 2**128
+    except:
+        raise ValueError("You must run this script in the correct directory")
 
 def hash_choice(seeds, values):
     return values[hash_randrange(seeds, len(values))]
@@ -341,4 +348,4 @@ if __name__ == '__main__':
     images_will_be_written_here = "images.npy"
     main()
     show_images()
-    convert_numpys_to_pngs(images_will_be_written_here, "generated_data")
+    convert_numpys_to_pngs(images_will_be_written_here, "generated_data8")

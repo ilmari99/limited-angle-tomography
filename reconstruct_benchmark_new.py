@@ -1,5 +1,7 @@
 import json
 import os
+import subprocess
+import sys
 
 import imageio
 from AbsorptionMatrices import Circle
@@ -335,9 +337,17 @@ def get_htc_scan(level = 1, sample = "a", return_raw_sinogram = False,angles=[])
     if return_raw_sinogram:
         sinogram = np.loadtxt(os.path.join(base_path, sinogram_file), delimiter=',')
         sinogram = pt.tensor(sinogram, dtype=pt.float32, device='cuda') * 255
-        #sinogram = pt.log(sinogram + 1)
-        # Standardize
-        #sinogram = (sinogram - pt.mean(sinogram)) / pt.std(sinogram)
+        
+        if level == 8:
+            sample_to_degrees = {
+                "a": 60,
+                "b": 50,
+                "c": 40,
+                "d": 30,
+            }
+            # Only take a part of the sinogram
+            angles = np.arange(0,sample_to_degrees[sample] + 0.5,0.5)
+            sinogram = sinogram[0:len(angles),:]
         return y, outer_mask, sinogram, angles
     
     return y, outer_mask
@@ -483,13 +493,13 @@ def create_regularization(use_tv_reg = True,
         regularizations.append(lambda x : use_tik_reg * tikhonov_regularization(x,normalize=True))
     if use_autoencoder_reg:
         use_autoencoder_reg = 1 if isinstance(use_autoencoder_reg,bool) else use_autoencoder_reg
-        reg = create_autoencoder_regularization(autoencoder_path,
+        regu = create_autoencoder_regularization(autoencoder_path,
                                                 autoencoder_patch_size,
                                                 autoencoder_latent_vars,
                                                 autoencoder_reconstruction_stride,
                                                 autoencoder_batch_size,
                                                 )
-        reg = lambda x : use_autoencoder_reg * reg(x)
+        reg = lambda x : use_autoencoder_reg * regu(x)
         regularizations.append(reg)
         
     if not regularizations:
@@ -505,101 +515,91 @@ def folder_name_from_params(base_name = "Benchmark", **kwargs):
     return base_name
     
 
-if __name__ == "__main__":
-    pt.set_default_device('cuda')
-    do_levels = [5,6,7]
-    skip_done_levels = True
-    filter_raw_sinogram_with_a = 5.0
-    filter_sinogram_of_predicted_image_with_a = 5.0
-    p_loss = 1
-    scale_sinogram = False
-    trim_sinogram = True
-    pad_y_and_mask = False
-    search_a_for_raw_sinogram = False
-    scale_shat_to_same_mean_and_std = False
-    plot_rounded = False
-    compare_s_score_to_unpadded = True
-    edge_pad_size = 0
-    use_no_model = False
-    sinogram_noise_std = 0.0
-    time_limit_s = 2
-    use_tv_reg = 1.0
-    use_bin_reg = 1.0
-    use_tik_reg = 1.0
-    use_autoencoder_reg = 0
-    autoencoder_path="patch_autoencoder_P40_D10_also_synth.pth"
-    autoencoder_patch_size=40
-    autoencoder_latent_vars=10
-    autoencoder_reconstruction_stride=5
-    autoencoder_batch_size=128
-    
-    
-    
+def run_benchmark(**kwargs):
+    do_levels = kwargs.get('do_levels', [5,6,7])
+    skip_done_levels = kwargs.get('skip_done_levels', False)
+    filter_raw_sinogram_with_a = kwargs.get('filter_raw_sinogram_with_a', 5.0)
+    filter_sinogram_of_predicted_image_with_a = kwargs.get('filter_sinogram_of_predicted_image_with_a', 5.0)
+    p_loss = kwargs.get('p_loss', 1)
+    scale_sinogram = kwargs.get('scale_sinogram', False)
+    trim_sinogram = kwargs.get('trim_sinogram', False)
+    pad_y_and_mask = kwargs.get('pad_y_and_mask', False)
+    search_a_for_raw_sinogram = kwargs.get('search_a_for_raw_sinogram', False)
+    scale_shat_to_same_mean_and_std = kwargs.get('scale_shat_to_same_mean_and_std', False)
+    compare_s_score_to_unpadded = kwargs.get('compare_s_score_to_unpadded', False)
+    edge_pad_size = kwargs.get('edge_pad_size', 0)
+    use_no_model = kwargs.get('use_no_model', False)
+    sinogram_noise_std = kwargs.get('sinogram_noise_std', 0)
+    time_limit_s = kwargs.get('time_limit_s', 60)
+    use_tv_reg = kwargs.get('use_tv_reg', False)
+    use_bin_reg = kwargs.get('use_bin_reg', False)
+    use_tik_reg = kwargs.get('use_tik_reg', False)
+    learning_rate = kwargs.get("learning_rate", 0.4 if use_no_model else 0.001)
+    use_autoencoder_reg = kwargs.get('use_autoencoder_reg', False)
+    autoencoder_path = kwargs.get('autoencoder_path', "")
+    autoencoder_patch_size = kwargs.get('autoencoder_patch_size', 40)
+    autoencoder_latent_vars = kwargs.get('autoencoder_latent_vars', 10)
+    autoencoder_reconstruction_stride = kwargs.get('autoencoder_reconstruction_stride', 5)
+    autoencoder_batch_size = kwargs.get('autoencoder_batch_size', 128)
+
     kwargs_for_naming = {
-        "Model":not use_no_model,
-        "P":p_loss,
-        "Filt":filter_raw_sinogram_with_a,
-        "Time":time_limit_s,
+        "Model": not use_no_model,
+        "P": p_loss,
+        "Filt": filter_raw_sinogram_with_a,
+        "Time": time_limit_s,
     }
-    
+
     if edge_pad_size != 0:
         kwargs_for_naming["EdgePad"] = edge_pad_size
     if use_tv_reg:
-        kwargs_for_naming["TV"] = "1"
+        kwargs_for_naming["TV"] = str(use_tv_reg)
     if use_bin_reg:
-        kwargs_for_naming["BinReg"] = "1"
+        kwargs_for_naming["BinReg"] = str(use_bin_reg)
     if use_tik_reg:
-        kwargs_for_naming["TK"] = "1"
+        kwargs_for_naming["TK"] = str(use_tik_reg)
     if use_autoencoder_reg:
         kwargs_for_naming["AutoEnc"] = f"Patch{autoencoder_patch_size}LV{autoencoder_latent_vars}"
         kwargs_for_naming["AutoEnc"] += f"Stride{autoencoder_reconstruction_stride}"
-    
-    FOLDER = folder_name_from_params(base_name="Benchmark",
-                                        **kwargs_for_naming)
+        kwargs_for_naming["Coeff"] = use_autoencoder_reg
+
+    FOLDER = folder_name_from_params(base_name="Benchmark", **kwargs_for_naming)
     print(f"Folder: {FOLDER}")
     os.makedirs(FOLDER, exist_ok=True)
     
-    regularization_ = create_regularization(use_tv_reg=use_tv_reg,
-                                            use_bin_reg=use_bin_reg,
-                                            use_tik_reg=use_tik_reg,
-                                            use_autoencoder_reg=use_autoencoder_reg,
-                                            autoencoder_path=autoencoder_path,
-                                            autoencoder_patch_size=autoencoder_patch_size,
-                                            autoencoder_latent_vars=autoencoder_latent_vars,
-                                            autoencoder_reconstruction_stride=autoencoder_reconstruction_stride,
-                                            autoencoder_batch_size=autoencoder_batch_size
-                                            )
-    
+    # Write the parameters to a file
+    with open(os.path.join(FOLDER, "params.json"), 'w') as f:
+        json.dump(kwargs, f)
+
+    regularization_ = create_regularization(
+        use_tv_reg=use_tv_reg,
+        use_bin_reg=use_bin_reg,
+        use_tik_reg=use_tik_reg,
+        use_autoencoder_reg=use_autoencoder_reg,
+        autoencoder_path=autoencoder_path,
+        autoencoder_patch_size=autoencoder_patch_size,
+        autoencoder_latent_vars=autoencoder_latent_vars,
+        autoencoder_reconstruction_stride=autoencoder_reconstruction_stride,
+        autoencoder_batch_size=autoencoder_batch_size
+    )
+
     criterion = LPLoss(p=p_loss)
-    
-    # Here we start looping the levels and samples
+
     for htc_level in do_levels:
-        # For each level, we loop the samples
-        # and keep track of the losses for each sample
-        # so we can average them at the end of the level
-        level_performances = {"a":[],"b":[],"c":[]}
-        for htc_sample in ["a","b","c"]:
+        level_performances = {"a": [], "b": [], "c": [], "d": []}
+        for htc_sample in ["a", "b", "c", "d"]:
             print(f"Level {htc_level}, sample {htc_sample}")
-            
-            # If we skip done levels, we check if the files are already there
+
             if skip_done_levels:
-                # Check if FOLDER/<n>_summary.json exists
                 summary_file = os.path.join(FOLDER, f"{htc_level}_summary.json")
                 if os.path.exists(summary_file):
                     print(f"File {summary_file} exists, skipping level {htc_level}, sample {htc_sample}")
                     with open(summary_file, 'r') as f:
                         content = json.load(f)
-                        # Check if has the key htc_sample
                         if htc_sample in content.keys():
                             print(f"Skipping level {htc_level}, sample {htc_sample}")
                             continue
-                
-            
-            # Initialize figures:
-            # Show loss info: 1. Regularization loss, 2. Reconstruction loss, 3. MCC
-            # Show image, sinogram, and the final predicted image, and it's sinogram
-            # Show a gif of the predicted image
-            loss_fig, loss_ax = plt.subplots(1,3)
+
+            loss_fig, loss_ax = plt.subplots(1, 3)
             loss_ax[0].set_title("Regularization loss")
             loss_ax[1].set_title("Reconstruction loss")
             loss_ax[2].set_title("MCC")
@@ -614,44 +614,37 @@ if __name__ == "__main__":
             reconstruction_losses = []
             mccs = []
 
-            image_fig, image_ax = plt.subplots(2,2)
-            image_ax[0,0].set_title("True image")
-            image_ax[0,1].set_title("Predicted image")
-            image_ax[1,0].set_title("True sinogram")
-            image_ax[1,1].set_title("Predicted sinogram")
-            image_ax[1,0].set_ylabel("Angle")
-            image_ax[1,1].set_ylabel("Angle")
-            image_ax[1,0].set_xlabel("Projection")
-            image_ax[1,1].set_xlabel("Projection")
+            image_fig, image_ax = plt.subplots(2, 2)
+            image_ax[0, 0].set_title("True image")
+            image_ax[0, 1].set_title("Predicted image")
+            image_ax[1, 0].set_title("True sinogram")
+            image_ax[1, 1].set_title("Predicted sinogram")
+            image_ax[1, 0].set_ylabel("Angle")
+            image_ax[1, 1].set_ylabel("Angle")
+            image_ax[1, 0].set_xlabel("Projection")
+            image_ax[1, 1].set_xlabel("Projection")
 
             reconstruction_images = []
-
-            sinogram = None
-            #y, image_mask = get_basic_circle_scan(angles=angles)
-            #y, image_mask = get_shepp_logan_scan(angles, image_dim=64)
-            #y, image_mask = get_htc_scan(angles=angles, level=htc_level, sample=htc_sample, return_raw_sinogram=False)
-            y, image_mask, sinogram, angles = get_htc_scan(angles=[], level=htc_level, sample=htc_sample, return_raw_sinogram=True)
-            #image_mask = None
-            #sinogram = None
             
-            # Set y axis ticks for the sinogram plots
-            image_ax[1,0].set_yticks(np.arange(0,len(angles),10))
-            image_ax[1,1].set_yticks(np.arange(0,len(angles),10))
-            image_ax[1,0].set_yticklabels(np.round(angles[::10],2))
-            image_ax[1,1].set_yticklabels(np.round(angles[::10],2))
+            try:
+                y, image_mask, sinogram, angles = get_htc_scan(angles=[], level=htc_level, sample=htc_sample, return_raw_sinogram=True)
+            except Exception as e:
+                print(f"Error getting HTC scan: {e}")
+                continue
+            image_ax[1, 0].set_yticks(np.arange(0, len(angles), 10))
+            image_ax[1, 1].set_yticks(np.arange(0, len(angles), 10))
+            image_ax[1, 0].set_yticklabels(np.round(angles[::10], 2))
+            image_ax[1, 1].set_yticklabels(np.round(angles[::10], 2))
 
-            # If we set the sinogram to None, we compute the sinogram using FBPRadon, either noiseless or noisy.
             if sinogram is None:
                 print(f"Sinogram is None, measuring sinogram")
                 radon_t_no_filter = FBPRadon(y.shape[1], np.deg2rad(angles), a=0)
                 sinogram = radon_t_no_filter.forward(y)
-                # Add noise
                 mean = pt.mean(sinogram)
                 std = pt.std(sinogram)
                 noise = pt.normal(0.0, sinogram_noise_std, size=sinogram.shape)
                 sinogram = sinogram + noise
 
-            # If we set the image_mask to None, we use a mask full of ones
             if image_mask is None:
                 image_mask = pt.ones(y.shape, requires_grad=False)
 
@@ -659,17 +652,14 @@ if __name__ == "__main__":
 
             assert not (trim_sinogram and pad_y_and_mask), "Cannot trim sinogram and pad y and mask"
             if trim_sinogram:
-                # Trim the sinogram to have the same number of columns as y,
-                # because why would the sinogram have more columns than the image?
                 num_extra_cols = sinogram.shape[1] - y.shape[1]
                 if num_extra_cols != 0:
                     rm_from_left = num_extra_cols // 2 - 1
                     rm_from_right = num_extra_cols - rm_from_left
-                    sinogram = sinogram[:, rm_from_left:sinogram.shape[1]-rm_from_right]
+                    sinogram = sinogram[:, rm_from_left:sinogram.shape[1] - rm_from_right]
                     print(f"Trimmed sinogram to shape: {sinogram.shape}")
 
             if pad_y_and_mask:
-                # Pad y to the number of columns in the sinogram
                 num_missing_rows = sinogram.shape[1] - y.shape[0]
                 num_missing_cols = sinogram.shape[1] - y.shape[1]
                 row_pad_up = num_missing_rows // 2
@@ -682,27 +672,27 @@ if __name__ == "__main__":
                 print(f"Padded y and mask from {y_not_padded.shape} to {y.shape}")
 
             if use_no_model:
-                model = NoModel(proj_dim = sinogram.shape[1],
-                                angles = np.deg2rad(angles),
-                                a=filter_sinogram_of_predicted_image_with_a,
-                                image_mask=image_mask,
-                                edge_pad_size=edge_pad_size,
-                                )
-                optimizer = optim.Adam(model.parameters(), lr=0.4, amsgrad=True)
+                model = NoModel(
+                    proj_dim=sinogram.shape[1],
+                    angles=np.deg2rad(angles),
+                    a=filter_sinogram_of_predicted_image_with_a,
+                    image_mask=image_mask,
+                    edge_pad_size=edge_pad_size,
+                )
+                optimizer = optim.Adam(model.parameters(), lr=learning_rate, amsgrad=True)
             else:
-                model = EncoderDecoderCNNReconstructor(proj_dim = sinogram.shape[1],
-                                                angles= np.deg2rad(angles),
-                                                latent_image_side_len=16,
-                                                encoder_filters=[32,64,128],
-                                                decoder_filters=[128,80,44,32,8,1],
-                                                a=filter_sinogram_of_predicted_image_with_a,
-                                                image_mask=image_mask,
-                                                edge_pad_size=edge_pad_size,
-                                            )
-                optimizer = optim.Adam(model.parameters(), lr=0.001, amsgrad=True)
+                model = EncoderDecoderCNNReconstructor(
+                    proj_dim=sinogram.shape[1],
+                    angles=np.deg2rad(angles),
+                    latent_image_side_len=22,
+                    encoder_filters=[f for f in [128,128,256,256,512]],
+                    decoder_filters=[f for f in [512,256,256,128,128,32,32,16,16,16,16,16,16]],
+                    a=filter_sinogram_of_predicted_image_with_a,
+                    image_mask=image_mask,
+                    edge_pad_size=edge_pad_size,
+                )
+                optimizer = optim.Adam(model.parameters(), lr=learning_rate, amsgrad=True)
 
-            #model = PredictSinogramAndReconstruct(128, np.deg2rad(angles), image_mask=outer_mask, device='cuda')
-            #model = BackprojectAndUNet(sinogram.shape[1], np.deg2rad(angles), a=filter_sinogram_of_predicted_image_with_a, image_mask=image_mask, device='cuda')
             model.to('cuda')
 
             raw_sinogram_mean = pt.mean(sinogram)
@@ -710,26 +700,21 @@ if __name__ == "__main__":
             raw_sinogram = sinogram
 
             if search_a_for_raw_sinogram:
-                # Find the value for A, that minimizes the difference between raw_sinogram,
-                # and the sinogram computed from the true object.
-                # This is not a realistic scenario, but we can use this to find a good quess for A during inference.
                 radon_t_no_filter = FBPRadon(y.shape[1], np.deg2rad(angles), a=filter_sinogram_of_predicted_image_with_a, device='cuda')
                 computed_sinogram = radon_t_no_filter.forward(y)
-                filter_raw_sinogram_with_a = find_good_a(computed_sinogram, raw_sinogram, device='cuda', lims=(0,10), num_samples=200)
+                filter_raw_sinogram_with_a = find_good_a(computed_sinogram, raw_sinogram, device='cuda', lims=(0, 10), num_samples=200)
                 print(f"The A filter value that when applied to the true sinogram, is closest to the computed sinogram is: {filter_raw_sinogram_with_a}")
 
             if filter_raw_sinogram_with_a != 0:
-                filtered_sinogram = filter_sinogram(raw_sinogram,filter_raw_sinogram_with_a,device="cuda")
+                filtered_sinogram = filter_sinogram(raw_sinogram, filter_raw_sinogram_with_a, device="cuda")
             else:
-                #raw_sinogram = raw_sinogram / 255
                 filtered_sinogram = raw_sinogram
             if scale_sinogram:
                 filtered_sinogram = (filtered_sinogram - pt.mean(filtered_sinogram)) / pt.std(filtered_sinogram)
-                
+
             filtered_sinogram_mean = pt.mean(filtered_sinogram)
             filtered_sinogram_std = pt.std(filtered_sinogram)
 
-            # Plot the true y, and the predicted y
             y_np = y.cpu().detach().numpy()
             filtered_sinogram_np = filtered_sinogram.cpu().detach().numpy()
             if compare_s_score_to_unpadded and pad_y_and_mask:
@@ -751,145 +736,107 @@ if __name__ == "__main__":
             while True:
                 elapsed_time = time.time() - start_time
                 if elapsed_time > time_limit_s and len(reconstruction_images) > 0:
-                    print(f"Time limit of {time_limit_s} seconds reached. Ending loop.")
+                    print(f"\nTime limit of {time_limit_s} seconds reached. Ending loop.")
                     break
 
-                # The model returns the predicted image y_hat (y.shape)
-                # and the predicted sinogram s (len(angles), y.shape[1])
                 y_hat, s_hat = model(raw_sinogram)
                 if iteration_number == 0:
                     try:
                         pass
-                        #print(summary(model,input_size=raw_sinogram.shape, batch_size=1))
                     except Exception as e:
                         pass
-                        #print(e)
                 y_hat = y_hat.reshape(y.shape)
-                s_hat = s_hat.reshape((len(angles), y.shape[1]))# / 255
-                
-                #y_hat = AUTOENCODER.remove_noise_from_img(y_hat, patch_size=40, stride=10, batch_size=128,patches_to_device="cpu", patches_to_dtype=pt.float32)
-                
-                # Scale s_hat to have the same mean and std as s
+                s_hat = s_hat.reshape((len(angles), y.shape[1]))
+
                 if scale_shat_to_same_mean_and_std:
                     s_hat = scale_to_mean_and_std(s_hat, filtered_sinogram_mean, filtered_sinogram_std)
-                    print(f"Scaled s_hat to mean: {pt.mean(s_hat)}, std: {pt.std(s_hat)}")
-                
-                # minimize criterion
-                criterion_loss = criterion(filtered_sinogram,s_hat)
-                
+
+                criterion_loss = criterion(filtered_sinogram, s_hat)
                 regularization_loss = regularization_(y_hat)
-                
                 y_hat_noise_reduced = y_hat
-                
                 loss = criterion_loss_coeff * criterion_loss + regularization_loss_coeff * regularization_loss
-                
+
                 criterion_losses.append(criterion_loss.item())
                 regularization_losses.append(regularization_loss.item())
                 total_losses.append(loss.item())
 
-                # Update the model
                 optimizer.zero_grad()
-                loss.backward(retain_graph = True)
+                loss.backward(retain_graph=True)
                 optimizer.step()
-                
-                # Squeeze and detach
+
                 y_hat_np = y_hat.cpu().detach().numpy()
                 s_hat_np = s_hat.cpu().detach().numpy()
-                #print(f"y hat np shape {y_hat.shape}")
-                # Let's use Matthews correlation coefficient between
-                # Round y_hat, and calculate a confusion matrix
-                # by comparing y_hat and y_np
-                M = np.zeros((2,2))
+                M = np.zeros((2, 2))
                 if compare_s_score_to_unpadded and pad_y_and_mask:
-                    #print(f"Using original Y, and not the padded version")
                     y_hat_np = y_hat_np[row_pad_up:-row_pad_down, col_pad_left:-col_pad_right]
                     y_np = y_not_padded_np
-                    
+
                 y_hat_np = np.clip(y_hat_np, 0, 1)
                 y_hat_rounded_np = np.round(y_hat_np)
+                M[0, 0] = np.sum(np.logical_and(y_np == 1, y_hat_rounded_np == 1))
+                M[0, 1] = np.sum(np.logical_and(y_np == 1, y_hat_rounded_np == 0))
+                M[1, 0] = np.sum(np.logical_and(y_np == 0, y_hat_rounded_np == 1))
+                M[1, 1] = np.sum(np.logical_and(y_np == 0, y_hat_rounded_np == 0))
 
-                # M = [[TP, FN], [FP, TN]]
-                M[0,0] = np.sum(np.logical_and(y_np == 1, y_hat_rounded_np == 1))
-                M[0,1] = np.sum(np.logical_and(y_np == 1, y_hat_rounded_np == 0))
-                M[1,0] = np.sum(np.logical_and(y_np == 0, y_hat_rounded_np == 1))
-                M[1,1] = np.sum(np.logical_and(y_np == 0, y_hat_rounded_np == 0))
-                
-                # MCC
                 if len(np.unique(y_np)) == 2:
-                    sc = (M[0,0] * M[1,1] - M[1,0]*M[0,1]) / np.sqrt((M[0,0] + M[0,1]) * (M[1,0] + M[1,1]) * (M[0,0] + M[1,0]) * (M[0,1] + M[1,1]))
-                    #sc = 1 - sc
+                    sc = (M[0, 0] * M[1, 1] - M[1, 0] * M[0, 1]) / np.sqrt(
+                        (M[0, 0] + M[0, 1]) * (M[1, 0] + M[1, 1]) * (M[0, 0] + M[1, 0]) * (M[0, 1] + M[1, 1]))
                 else:
                     sc = ssim(y.unsqueeze(0).unsqueeze(0), y_hat.unsqueeze(0).unsqueeze(0), data_range=1)
                     sc = sc.item()
-                
-                    
+
                 reconstruction_errors.append(sc)
-                
                 iteration_number += 1
-                
                 regularization_losses.append(regularization_loss.item())
                 reconstruction_losses.append(criterion_loss.item())
                 mccs.append(sc)
-                
-                if iteration_number % 50 == 0:
+
+                if iteration_number % 50 == 0 or iteration_number == 1:
                     reconstruction_images.append(y_hat_np)
-                
-                # Every 50 iterations, print progress information
+
                 if iteration_number % 50 == 0:
                     s = f"Iteration: {iteration_number}, Loss: {loss.item()}, Criterion loss: {criterion_loss.item()}, Regularization loss: {regularization_loss.item()}, MCC: {sc}"
                     print(s, end="\r")
             print()
-            # Plot the loss, and the images
             loss_ax[0].plot(regularization_losses)
             loss_ax[1].plot(reconstruction_losses)
             loss_ax[2].plot(mccs)
 
-            image_ax[0,0].imshow(y_np)
-            image_ax[0,1].imshow(y_hat_np)
-            image_ax[1,0].imshow(filtered_sinogram_np)
-            image_ax[1,1].imshow(s_hat_np)
+            image_ax[0, 0].imshow(y_np)
+            image_ax[0, 1].imshow(y_hat_np)
+            image_ax[1, 0].imshow(filtered_sinogram_np)
+            image_ax[1, 1].imshow(s_hat_np)
 
-            # Save the figures
             loss_fig.savefig(f"{FOLDER}/{htc_level}{htc_sample}_loss.png")
             image_fig.savefig(f"{FOLDER}/{htc_level}{htc_sample}_images.png")
 
-            # Save the gif
-            reconstruction_images = [255*x for x in reconstruction_images]
+            reconstruction_images = [255 * x for x in reconstruction_images]
             imageio.mimsave(f"{FOLDER}/{htc_level}{htc_sample}_reconstruction.gif", reconstruction_images)
-            
-            # Save the results for this sample
+
             level_performances[htc_sample] = {
-                "regularization_losses":regularization_losses,
-                "reconstruction_losses":reconstruction_losses,
-                "mccs":mccs,
+                "regularization_losses": regularization_losses,
+                "reconstruction_losses": reconstruction_losses,
+                "mccs": mccs,
             }
-            
-        # After a level is done, we save a summary of the results if we have any
-        
+
         summary_file = f"{FOLDER}/{htc_level}_summary.json"
         if os.path.exists(summary_file):
             with open(summary_file, "r") as f:
                 existing_data = json.load(f)
         else:
             existing_data = {}
-
-        # First, get the final mcc for each sample
+        
         print(level_performances)
         if level_performances["a"]:
             final_mccs = {sample: level_performances[sample]["mccs"][-1] for sample in level_performances.keys()}
-            # Create a new dictionary with "final_mccs" as the first key-value pair
             level_performances_with_final_mccs = {"final_mccs": final_mccs}
             level_performances_with_final_mccs.update(level_performances)
-        
-            # Update existing data with new data
             existing_data.update(level_performances_with_final_mccs)
-            
             with open(summary_file, "w") as f:
                 json.dump(existing_data, f)
         else:
             print(f"No new results for level {htc_level}")
-        
-    # After all levels are done, we save the average final mcc for each level
+
     levels_to_mccs = {}
     for level in do_levels:
         with open(f"{FOLDER}/{level}_summary.json", "r") as f:
@@ -900,4 +847,92 @@ if __name__ == "__main__":
     with open(f"{FOLDER}/summary.json", "w") as f:
         json.dump(levels_to_mccs, f)
     print(f"Results saved to {FOLDER}")
-        
+    
+def plot_sinogram_and_filtered_sinogram(htc_level, htc_sample, a = 5.5  ):
+    y, image_mask, sinogram, angles = get_htc_scan(angles=[], level=htc_level, sample=htc_sample, return_raw_sinogram=True)
+    filtered_sinogram = filter_sinogram(sinogram, a=a, device='cuda')
+    # Plot the unfiltered sinogram and the filtered sinogram
+    fig, ax = plt.subplots(1,2)
+    sinogram = filter_sinogram(sinogram, a=0.1, device='cuda')
+    ax[0].imshow(sinogram.cpu().detach().numpy().T)
+    ax[0].set_title("Sinogram filtered with a=0.1")
+    ax[1].imshow(filtered_sinogram.cpu().detach().numpy().T)
+    ax[1].set_title(f"Sinogram filtered with a={a}")
+    plt.show()
+    
+    
+    
+
+if __name__ == "__main__":
+    pt.set_default_device('cuda')
+    do_levels = [8]
+    skip_done_levels = True
+    filter_raw_sinogram_with_a = 5.5
+    filter_sinogram_of_predicted_image_with_a = 5.5
+    p_loss = 2
+    scale_sinogram = False
+    trim_sinogram = True
+    pad_y_and_mask = False
+    search_a_for_raw_sinogram = False
+    scale_shat_to_same_mean_and_std = False
+    plot_rounded = False
+    compare_s_score_to_unpadded = True
+    edge_pad_size = 0
+    use_no_model = False
+    sinogram_noise_std = 0.0
+    time_limit_s = 30
+    use_tv_reg = 1.0
+    use_bin_reg = 0.0
+    use_tik_reg = 0.5
+    use_autoencoder_reg = 0.5
+    #autoencoder_path="patch_autoencoder_P40_D10_also_synth.pth"
+    autoencoder_patch_size=40
+    autoencoder_batch_size=128
+    
+    for use_no_model in [False]:
+        for filter_raw_sinogram_with_a in [5.5]:
+            filter_sinogram_of_predicted_image_with_a = filter_raw_sinogram_with_a
+            for p_loss in [2]:
+                for time_limit_s in [120,200,300,400]:
+                    for use_tv_reg in [1.0]:
+                        for use_tik_reg in [0]:
+                            for use_autoencoder_reg in [0.02, 0.3]:
+                                for autoencoder_patch_size in [15, 30, 60]:
+                                    autoencoder_latent_vars = autoencoder_patch_size // 4
+                                    autoencoder_reconstruction_stride = autoencoder_patch_size // 4
+                                    autoencoder_path = f"patch_autoencoder_P{autoencoder_patch_size}_D{autoencoder_latent_vars}.pth"
+                                    if not os.path.exists(autoencoder_path):
+                                        # Run ./learn_patch_autoencoder.py --patch_size x
+                                        pyexe = sys.executable
+                                        with open(f"patch_autoencoder_P{autoencoder_patch_size}_training_output.txt", "w") as f:
+                                            result = subprocess.run([pyexe, "learn_patch_autoencoder.py", "--patch_size", str(autoencoder_patch_size)], stdout=f, stderr=subprocess.STDOUT)
+                                            if result.returncode != 0:
+                                                print(f"Error training autoencoder with patch size {autoencoder_patch_size}. Check the output file for details.")
+                                                exit(1)
+                                    kwargs = {
+                                        "do_levels": do_levels,
+                                        "skip_done_levels": skip_done_levels,
+                                        "filter_raw_sinogram_with_a": filter_raw_sinogram_with_a,
+                                        "filter_sinogram_of_predicted_image_with_a": filter_sinogram_of_predicted_image_with_a,
+                                        "p_loss": p_loss,
+                                        "scale_sinogram": scale_sinogram,
+                                        "trim_sinogram": trim_sinogram,
+                                        "pad_y_and_mask": pad_y_and_mask,
+                                        "search_a_for_raw_sinogram": search_a_for_raw_sinogram,
+                                        "scale_shat_to_same_mean_and_std": scale_shat_to_same_mean_and_std,
+                                        "compare_s_score_to_unpadded": compare_s_score_to_unpadded,
+                                        "edge_pad_size": edge_pad_size,
+                                        "use_no_model": use_no_model,
+                                        "sinogram_noise_std": sinogram_noise_std,
+                                        "time_limit_s": time_limit_s,
+                                        "use_tv_reg": use_tv_reg,
+                                        "use_bin_reg": use_bin_reg,
+                                        "use_tik_reg": use_tik_reg,
+                                        "use_autoencoder_reg": use_autoencoder_reg,
+                                        "autoencoder_path": autoencoder_path,
+                                        "autoencoder_patch_size": autoencoder_patch_size,
+                                        "autoencoder_latent_vars": autoencoder_latent_vars,
+                                        "autoencoder_reconstruction_stride": autoencoder_reconstruction_stride,
+                                        "autoencoder_batch_size": autoencoder_batch_size,
+                                    }
+                                    run_benchmark(**kwargs)

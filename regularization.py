@@ -4,23 +4,29 @@ from pytorch_msssim import ssim
 # Import mobilenet_v2
 from torchvision.models import mobilenet_v3_small
 from kornia.filters import spatial_gradient
-from learn_patch_autoencoder import PatchAutoencoder
+from learn_patch_autoencoder import PatchAutoencoder, AdvancedPatchAutoencoder
 
 def create_autoencoder_regularization(autoencoder_path, patch_size, num_latent, stride, batch_size):
     """ Return a callable that can be used to regularize the latent representation of an image.
     """
     autoencoder = PatchAutoencoder(patch_size, num_latent, autoencoder_path)
-    autoencoder.to('cuda').eval()
+    # Set the dtype to float16 and mode to eval
+    autoencoder.to('cuda', dtype=torch.float32)
+    autoencoder = autoencoder.eval()
+
     def regularization(y_hat):
         # Remove noise from the image
         reconstruction = autoencoder.remove_noise_from_img(y_hat,
                                                  patch_size=patch_size,
                                                  stride=stride,
                                                  batch_size=batch_size,
-                                                 patches_to_device='cpu',
-                                                 patches_to_dtype=torch.float16
+                                                 #patches_to_device='cpu',
+                                                 #patches_to_dtype=torch.float16
         )
         reconstruction = reconstruction.to(y_hat.device)
+        # Check that there are no NaN values
+        assert not torch.isnan(reconstruction).any(), "There are NaN values in the reconstruction"
+        assert not torch.isnan(y_hat).any(), "There are NaN values in y_hat"
         diff = torch.mean(torch.abs(y_hat - reconstruction))
         return diff
     return regularization
