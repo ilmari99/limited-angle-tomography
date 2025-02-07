@@ -1,9 +1,11 @@
+import itertools
 import json
 import os
 import subprocess
 import sys
 
 import imageio
+import pandas as pd
 from AbsorptionMatrices import Circle
 import torch as pt
 import torch.nn as nn
@@ -12,6 +14,8 @@ from torchvision.io import read_image, ImageReadMode
 import numpy as np
 import matplotlib.pyplot as plt
 from reconstruct import reconstruct_outer_shape
+
+from skimage.filters import threshold_multiotsu
 
 from utils import (filter_sinogram,
                    FBPRadon,
@@ -23,6 +27,7 @@ from utils import (filter_sinogram,
 from pytorch_msssim import ssim, ms_ssim
 import phantominator as ph
 from regularization import (create_autoencoder_regularization,
+                            create_autoencoder_regularization_diff,
                             binary_regularization,
                             total_variation_regularization,
                             tikhonov_regularization,
@@ -157,18 +162,19 @@ class EncoderDecoderCNNReconstructor(ReconstructorBase):
 class HTCModelReconstructor(ReconstructorBase):
     """ This class is for models, that predict the image directly from the sinogram.
     """
-    def __init__(self, proj_dim: int, angles, a = 0.1, image_mask=None, device="cuda", edge_pad_size=5):
+    def __init__(self, proj_dim: int, angles, a = 0.1, image_mask=None, device="cuda", edge_pad_size=5, init_features=32):
         self.use_original = True if proj_dim == 560 else False
+        self.init_features = init_features
         super().__init__(proj_dim, angles, a = a, image_mask=image_mask, device=device, edge_pad_size=edge_pad_size)
         self.nn = self.create_nn()
         
     def create_nn(self) -> nn.Module:
         if self.use_original:
             print("Using original HTC model")
-            htc_net = HTCModel((181, self.dim), init_features=128, overwrite_cache=False, init_channels=2)
+            htc_net = HTCModel((181, self.dim), init_features=self.init_features, overwrite_cache=False, init_channels=2)
         else:
             print("Using new HTC model")
-            htc_net = HTCModel((len(self.angles), self.dim), init_features=64, overwrite_cache=False, init_channels=1)
+            htc_net = HTCModel((len(self.angles), self.dim), init_features=self.init_features, overwrite_cache=False, init_channels=1)
             
         htc_net.to("cuda")
         return htc_net
@@ -516,7 +522,7 @@ def folder_name_from_params(base_name = "Benchmark", **kwargs):
     
 
 def run_benchmark(**kwargs):
-    do_levels = kwargs.get('do_levels', [5,6,7])
+    do_levels = kwargs.get('do_levels', [5, 6,7])
     skip_done_levels = kwargs.get('skip_done_levels', False)
     filter_raw_sinogram_with_a = kwargs.get('filter_raw_sinogram_with_a', 5.0)
     filter_sinogram_of_predicted_image_with_a = kwargs.get('filter_sinogram_of_predicted_image_with_a', 5.0)
@@ -527,6 +533,7 @@ def run_benchmark(**kwargs):
     search_a_for_raw_sinogram = kwargs.get('search_a_for_raw_sinogram', False)
     scale_shat_to_same_mean_and_std = kwargs.get('scale_shat_to_same_mean_and_std', False)
     compare_s_score_to_unpadded = kwargs.get('compare_s_score_to_unpadded', False)
+    use_otsu = kwargs.get("use_otsu", False)
     edge_pad_size = kwargs.get('edge_pad_size', 0)
     use_no_model = kwargs.get('use_no_model', False)
     sinogram_noise_std = kwargs.get('sinogram_noise_std', 0)
@@ -547,6 +554,7 @@ def run_benchmark(**kwargs):
         "P": p_loss,
         "Filt": filter_raw_sinogram_with_a,
         "Time": time_limit_s,
+        "use_otsu": use_otsu,
     }
 
     if edge_pad_size != 0:
@@ -562,7 +570,7 @@ def run_benchmark(**kwargs):
         kwargs_for_naming["AutoEnc"] += f"Stride{autoencoder_reconstruction_stride}"
         kwargs_for_naming["Coeff"] = use_autoencoder_reg
 
-    FOLDER = folder_name_from_params(base_name="Benchmark", **kwargs_for_naming)
+    FOLDER = folder_name_from_params(base_name="NewBenchmark", **kwargs_for_naming)
     print(f"Folder: {FOLDER}")
     os.makedirs(FOLDER, exist_ok=True)
     
@@ -585,8 +593,9 @@ def run_benchmark(**kwargs):
     criterion = LPLoss(p=p_loss)
 
     for htc_level in do_levels:
-        level_performances = {"a": [], "b": [], "c": [], "d": []}
-        for htc_sample in ["a", "b", "c", "d"]:
+        samples = ["a", "b", "c"] if htc_level != 8 else ["a", "b", "c", "d"]
+        level_performances = {s:[] for s in samples}
+        for htc_sample in samples:
             print(f"Level {htc_level}, sample {htc_sample}")
 
             if skip_done_levels:
@@ -681,12 +690,9 @@ def run_benchmark(**kwargs):
                 )
                 optimizer = optim.Adam(model.parameters(), lr=learning_rate, amsgrad=True)
             else:
-                model = EncoderDecoderCNNReconstructor(
+                model = HTCModelReconstructor(
                     proj_dim=sinogram.shape[1],
                     angles=np.deg2rad(angles),
-                    latent_image_side_len=22,
-                    encoder_filters=[f for f in [128,128,256,256,512]],
-                    decoder_filters=[f for f in [512,256,256,128,128,32,32,16,16,16,16,16,16]],
                     a=filter_sinogram_of_predicted_image_with_a,
                     image_mask=image_mask,
                     edge_pad_size=edge_pad_size,
@@ -765,6 +771,10 @@ def run_benchmark(**kwargs):
                 optimizer.step()
 
                 y_hat_np = y_hat.cpu().detach().numpy()
+                if use_otsu:
+                    thresholds = threshold_multiotsu(y_hat_np, 2)
+                    y_hat_np = np.digitize(y_hat_np, bins=thresholds).astype(np.uint8)
+                    
                 s_hat_np = s_hat.cpu().detach().numpy()
                 M = np.zeros((2, 2))
                 if compare_s_score_to_unpadded and pad_y_and_mask:
@@ -859,80 +869,150 @@ def plot_sinogram_and_filtered_sinogram(htc_level, htc_sample, a = 5.5  ):
     ax[1].imshow(filtered_sinogram.cpu().detach().numpy().T)
     ax[1].set_title(f"Sinogram filtered with a={a}")
     plt.show()
+
+
+def run_benchmark(
+    do_levels=[5, 6, 7],
+    skip_done_levels=False,
+    filter_raw_sinogram_with_a=5.0,
+    filter_sinogram_of_predicted_image_with_a=5.0,
+    p_loss=1,
+    scale_sinogram=False,
+    trim_sinogram=False,
+    pad_y_and_mask=False,
+    search_a_for_raw_sinogram=False,
+    scale_shat_to_same_mean_and_std=False,
+    compare_s_score_to_unpadded=False,
+    edge_pad_size=0,
+    use_no_model=False,
+    sinogram_noise_std=0,
+    time_limit_s=60,
+    use_tv_reg=False,
+    use_bin_reg=False,
+    use_tik_reg=False,
+    use_autoencoder_reg=False,
+    autoencoder_path="",
+    autoencoder_patch_size=40,
+    autoencoder_latent_vars=10,
+    autoencoder_reconstruction_stride=5,
+    autoencoder_batch_size=128,
+    ):
     
+    autoencoder_latent_vars = autoencoder_patch_size // 4
+    autoencoder_reconstruction_stride = autoencoder_patch_size
+    autoencoder_path = f"patch_autoencoder_P{autoencoder_patch_size}_D{autoencoder_latent_vars}.pth"
+    if not os.path.exists(autoencoder_path):
+        # Run ./learn_patch_autoencoder.py --patch_size x
+        pyexe = sys.executable
+        with open(f"patch_autoencoder_P{autoencoder_patch_size}_training_output.txt", "w") as f:
+            result = subprocess.run([pyexe, "learn_patch_autoencoder.py", "--patch_size", str(autoencoder_patch_size)], stdout=f, stderr=subprocess.STDOUT)
+            if result.returncode != 0:
+                print(f"Error training autoencoder with patch size {autoencoder_patch_size}. Check the output file for details.")
+                exit(1)
+    
+    # Run ./learn_patch_autoencoder.py --patch_size x
+    pyexe = sys.executable
+    with open(f"patch_autoencoder_P{autoencoder_patch_size}_training_output.txt", "w") as f:
+        result = subprocess.run([pyexe, "learn_patch_autoencoder.py", "--patch_size", str(autoencoder_patch_size)], stdout=f, stderr=subprocess.STDOUT)
+        if result.returncode != 0:
+            print(f"Error training autoencoder with patch size {autoencoder_patch_size}. Check the output file for details.")
+            exit(1)
+    kwargs = {
+        "do_levels": do_levels,
+        "skip_done_levels": skip_done_levels,
+        "filter_raw_sinogram_with_a": filter_raw_sinogram_with_a,
+        "filter_sinogram_of_predicted_image_with_a": filter_sinogram_of_predicted_image_with_a,
+        "p_loss": p_loss,
+        "scale_sinogram": scale_sinogram,
+        "trim_sinogram": trim_sinogram,
+        "pad_y_and_mask": pad_y_and_mask,
+        "search_a_for_raw_sinogram": search_a_for_raw_sinogram,
+        "scale_shat_to_same_mean_and_std": scale_shat_to_same_mean_and_std,
+        "compare_s_score_to_unpadded": compare_s_score_to_unpadded,
+        "edge_pad_size": edge_pad_size,
+        "use_no_model": use_no_model,
+        "sinogram_noise_std": sinogram_noise_std,
+        "time_limit_s": time_limit_s,
+        "use_tv_reg": use_tv_reg,
+        "use_otsu":False,
+        "use_bin_reg": use_bin_reg,
+        "use_tik_reg": use_tik_reg,
+        "use_autoencoder_reg": use_autoencoder_reg,
+        "autoencoder_path": autoencoder_path,
+        "autoencoder_patch_size": autoencoder_patch_size,
+        "autoencoder_latent_vars": autoencoder_latent_vars,
+        "autoencoder_reconstruction_stride": autoencoder_reconstruction_stride,
+        "autoencoder_batch_size": autoencoder_batch_size,
+    }
+    run_benchmark(**kwargs)
     
     
 
 if __name__ == "__main__":
     pt.set_default_device('cuda')
-    do_levels = [8]
-    skip_done_levels = True
-    filter_raw_sinogram_with_a = 5.5
-    filter_sinogram_of_predicted_image_with_a = 5.5
-    p_loss = 2
-    scale_sinogram = False
-    trim_sinogram = True
-    pad_y_and_mask = False
-    search_a_for_raw_sinogram = False
-    scale_shat_to_same_mean_and_std = False
-    plot_rounded = False
-    compare_s_score_to_unpadded = True
-    edge_pad_size = 0
-    use_no_model = False
-    sinogram_noise_std = 0.0
-    time_limit_s = 30
-    use_tv_reg = 1.0
-    use_bin_reg = 0.0
-    use_tik_reg = 0.5
-    use_autoencoder_reg = 0.5
-    #autoencoder_path="patch_autoencoder_P40_D10_also_synth.pth"
+    # Simple test
+    if False:
+        settings = {
+            "do_levels": [5],
+            "skip_done_levels": False,
+            "filter_raw_sinogram_with_a": 5.0,
+            "filter_sinogram_of_predicted_image_with_a": 5.0,
+            "p_loss": 1,
+            "scale_sinogram": False,
+            "trim_sinogram": True,
+            "pad_y_and_mask": False,
+            "search_a_for_raw_sinogram": False,
+            "use_otsu":True,
+            "time_limit_s": 6,
+            "use_no_model":True,
+        }
+        
+        run_benchmark(**settings)
+        
+        
+        
+        exit()
+    
+    if False:
+        # Fetch settings from best3["file_path"]
+        best3 = pd.read_excel("best3.xlsx")
+        settings_to_run = best3["file_path"].values
+        
+        # Run the benchmark with each settings
+        for settings in settings_to_run:
+            settings = settings + "_top3"
+            params_file = f"{settings}/params.json"
+            with open(params_file, 'r') as f:
+                params = json.load(f)
+            params["do_levels"] = list(range(7,9))
+            params["use_otsu"] = True
+            run_benchmark(**params)
+            
+        
+        exit()
+    do_levels=[5, 6, 7]
+    skip_done_levels=False
+    filter_raw_sinogram_with_a=5.0
+    filter_sinogram_of_predicted_image_with_a=5.0
+    p_loss=1
+    scale_sinogram=False
+    trim_sinogram=False
+    pad_y_and_mask=False
+    search_a_for_raw_sinogram=False
+    scale_shat_to_same_mean_and_std=False
+    compare_s_score_to_unpadded=False
+    edge_pad_size=0
+    use_no_model=False
+    sinogram_noise_std=0
+    time_limit_s=60
+    use_tv_reg=False
+    use_bin_reg=False
+    use_tik_reg=False
+    use_autoencoder_reg=False
+    autoencoder_path=""
     autoencoder_patch_size=40
+    autoencoder_latent_vars=10
+    autoencoder_reconstruction_stride=5
     autoencoder_batch_size=128
     
-    for use_no_model in [False]:
-        for filter_raw_sinogram_with_a in [5.5]:
-            filter_sinogram_of_predicted_image_with_a = filter_raw_sinogram_with_a
-            for p_loss in [2]:
-                for time_limit_s in [120,200,300,400]:
-                    for use_tv_reg in [1.0]:
-                        for use_tik_reg in [0]:
-                            for use_autoencoder_reg in [0.02, 0.3]:
-                                for autoencoder_patch_size in [15, 30, 60]:
-                                    autoencoder_latent_vars = autoencoder_patch_size // 4
-                                    autoencoder_reconstruction_stride = autoencoder_patch_size // 4
-                                    autoencoder_path = f"patch_autoencoder_P{autoencoder_patch_size}_D{autoencoder_latent_vars}.pth"
-                                    if not os.path.exists(autoencoder_path):
-                                        # Run ./learn_patch_autoencoder.py --patch_size x
-                                        pyexe = sys.executable
-                                        with open(f"patch_autoencoder_P{autoencoder_patch_size}_training_output.txt", "w") as f:
-                                            result = subprocess.run([pyexe, "learn_patch_autoencoder.py", "--patch_size", str(autoencoder_patch_size)], stdout=f, stderr=subprocess.STDOUT)
-                                            if result.returncode != 0:
-                                                print(f"Error training autoencoder with patch size {autoencoder_patch_size}. Check the output file for details.")
-                                                exit(1)
-                                    kwargs = {
-                                        "do_levels": do_levels,
-                                        "skip_done_levels": skip_done_levels,
-                                        "filter_raw_sinogram_with_a": filter_raw_sinogram_with_a,
-                                        "filter_sinogram_of_predicted_image_with_a": filter_sinogram_of_predicted_image_with_a,
-                                        "p_loss": p_loss,
-                                        "scale_sinogram": scale_sinogram,
-                                        "trim_sinogram": trim_sinogram,
-                                        "pad_y_and_mask": pad_y_and_mask,
-                                        "search_a_for_raw_sinogram": search_a_for_raw_sinogram,
-                                        "scale_shat_to_same_mean_and_std": scale_shat_to_same_mean_and_std,
-                                        "compare_s_score_to_unpadded": compare_s_score_to_unpadded,
-                                        "edge_pad_size": edge_pad_size,
-                                        "use_no_model": use_no_model,
-                                        "sinogram_noise_std": sinogram_noise_std,
-                                        "time_limit_s": time_limit_s,
-                                        "use_tv_reg": use_tv_reg,
-                                        "use_bin_reg": use_bin_reg,
-                                        "use_tik_reg": use_tik_reg,
-                                        "use_autoencoder_reg": use_autoencoder_reg,
-                                        "autoencoder_path": autoencoder_path,
-                                        "autoencoder_patch_size": autoencoder_patch_size,
-                                        "autoencoder_latent_vars": autoencoder_latent_vars,
-                                        "autoencoder_reconstruction_stride": autoencoder_reconstruction_stride,
-                                        "autoencoder_batch_size": autoencoder_batch_size,
-                                    }
-                                    run_benchmark(**kwargs)
+    

@@ -31,6 +31,29 @@ def create_autoencoder_regularization(autoencoder_path, patch_size, num_latent, 
         return diff
     return regularization
 
+def create_autoencoder_regularization_diff(autoencoder_path, patch_size, num_latent, stride, batch_size):
+    """ Return a callable that can be used to regularize the latent representation of an image.
+    """
+    autoencoder = PatchAutoencoder(patch_size, num_latent, autoencoder_path)
+    autoencoder.to('cuda', dtype=torch.float32)
+    autoencoder = autoencoder.eval()
+
+    def regularization(y_hat):
+        # Remove noise from the image
+        reconstruction = autoencoder.remove_noise_from_img_diff(y_hat,
+                                                 patch_size=patch_size,
+                                                 stride=stride,
+                                                 batch_size=batch_size,
+        )
+        reconstruction = reconstruction.to(y_hat.device)
+        # Check that there are no NaN values
+        
+        assert not torch.isnan(reconstruction).any(), "There are NaN values in the reconstruction"
+        assert not torch.isnan(y_hat).any(), "There are NaN values in y_hat"
+        diff = torch.mean(torch.abs(y_hat - reconstruction))
+        return diff
+    return regularization
+
 def total_variation_regularization(mat, normalize=True, order=1):
     """ Calculate the total variation of an image
     """

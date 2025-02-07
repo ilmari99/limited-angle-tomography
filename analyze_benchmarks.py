@@ -12,6 +12,8 @@ def read_params_and_summary(base_dir):
         # If the relative dir starts with __, skip it
         if os.path.relpath(root, base_dir).startswith("__") or os.path.relpath(root, base_dir).startswith("."):
             continue
+        if not os.path.relpath(root, base_dir).startswith("BenchmarkHTC"):
+            continue
         print(root)
         print(os.path.relpath(root, base_dir))
         if 'params.json' in files and '8_summary.json' in files:
@@ -46,14 +48,14 @@ if __name__ == "__main__":
     
     # Changing cols: filter_raw_sinogram_with_a, use_tik_reg, use_tv_reg, time_limit, use_no_model, p_loss
     # Find the best 3 (max sum_mcc)
-    best3 = df.sort_values("sum_mcc", ascending=False).head(3)
+    best3 = df.sort_values("sum_mcc", ascending=False).head(5)
     print(best3)
     # To excel
-    best3.to_excel("best3.xlsx")
-    exit()
+    best3.to_excel("best.xlsx")
+    #exit()
     
     # For each parameter plot a bar plot of the mean sum_mcc
-    fig, ax = plt.subplots(3, 4, figsize=(20, 12))
+    fig, ax = plt.subplots(3, 3, figsize=(20, 12))
     for i, col in enumerate(["filter_raw_sinogram_with_a",
                              "use_tik_reg",
                              "use_tv_reg",
